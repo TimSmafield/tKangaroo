@@ -3,4 +3,4 @@ docker system prune -a --volumes
 docker build --build-arg CCAP=61 -t kangaroo:gpu .
 
 
-docker run --rm -it --gpus all -v C:\psi\docker:/work kangaroo:gpu -gpu -t 8 -m 14 -o /work/run.out /work/test.conf
+docker run --rm -it --gpus all -v C:\psi\docker\kangroo:/work kangaroo:gpu -gpu -t 8 -m 14 -o /work/run.out /work/test.conf
