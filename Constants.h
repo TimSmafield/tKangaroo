@@ -21,18 +21,23 @@
 // Release number
 #define RELEASE "2.2"
 
-// Use symmetry
-//#define USE_SYMMETRY
+// Use symmetry - provides sqrt(2) speedup (~41% faster)
+// Enabled for 150-bit support
+#define USE_SYMMETRY
 
 // Number of random jumps
-// Max 512 for the GPU
-#define NB_JUMP 32
+// Max 512 for the GPU - increased to 64 for better distribution
+// More jumps = more uniform random walk = closer to theoretical bounds
+#define NB_JUMP 64
 
 // GPU group size
+// 128 is optimal balance between throughput and register pressure
+// Higher values may cause register spills on older GPUs
 #define GPU_GRP_SIZE 128
 
 // GPU number of run per kernel call
-#define NB_RUN 64
+// Increased for better GPU utilization and reduced kernel launch overhead
+#define NB_RUN 128
 
 // Kangaroo type
 #define TAME 0  // Tame kangaroo

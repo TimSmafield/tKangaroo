@@ -46,8 +46,9 @@ OBJET = $(addprefix $(OBJDIR)/, \
 endif
 
 CXX        = g++
-CUDA       = /usr/local/cuda-8.0
-CXXCUDA    = /usr/bin/g++-4.8
+# CUDA path - adjust for your system (common paths: /usr/local/cuda, /usr/local/cuda-11.0, /usr/local/cuda-12.0)
+CUDA       ?= /usr/local/cuda
+CXXCUDA    ?= $(CXX)
 NVCC       = $(CUDA)/bin/nvcc
 GIT_COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 PERF_CXXFLAGS = $(CXXFLAGS) -DPERF_GIT_COMMIT=\"$(GIT_COMMIT)\"
@@ -55,18 +56,20 @@ PERF_CXXFLAGS = $(CXXFLAGS) -DPERF_GIT_COMMIT=\"$(GIT_COMMIT)\"
 ifdef gpu
 
 ifdef debug
-CXXFLAGS   = -DWITHGPU -m64  -mssse3 -Wno-unused-result -Wno-write-strings -g -I. -I$(CUDA)/include
+CXXFLAGS   = -DWITHGPU -m64 -march=native -mssse3 -Wno-unused-result -Wno-write-strings -g -I. -I$(CUDA)/include
 else
-CXXFLAGS   = -DWITHGPU -m64 -mssse3 -Wno-unused-result -Wno-write-strings -O2 -I. -I$(CUDA)/include
+# Added -O3 and -march=native for better CPU performance
+CXXFLAGS   = -DWITHGPU -m64 -march=native -mssse3 -Wno-unused-result -Wno-write-strings -O3 -I. -I$(CUDA)/include
 endif
 LFLAGS     = -lpthread -L$(CUDA)/lib64 -lcudart -lcrypto
 
 else
 
 ifdef debug
-CXXFLAGS   = -m64 -mssse3 -Wno-unused-result -Wno-write-strings -g -I. -I$(CUDA)/include
+CXXFLAGS   = -m64 -march=native -mssse3 -Wno-unused-result -Wno-write-strings -g -I. -I$(CUDA)/include
 else
-CXXFLAGS   =  -m64 -mssse3 -Wno-unused-result -Wno-write-strings -O2 -I. -I$(CUDA)/include
+# Added -O3 and -march=native for better CPU performance
+CXXFLAGS   = -m64 -march=native -mssse3 -Wno-unused-result -Wno-write-strings -O3 -I. -I$(CUDA)/include
 endif
 LFLAGS     = -lpthread -lcrypto
 
@@ -80,7 +83,8 @@ $(OBJDIR)/GPU/GPUEngine.o: GPU/GPUEngine.cu
 	$(NVCC) -G -maxrregcount=0 --ptxas-options=-v --compile --compiler-options -fPIC -ccbin $(CXXCUDA) -m64 -g -I$(CUDA)/include -gencode=arch=compute_$(ccap),code=sm_$(ccap) -o $(OBJDIR)/GPU/GPUEngine.o -c GPU/GPUEngine.cu
 else
 $(OBJDIR)/GPU/GPUEngine.o: GPU/GPUEngine.cu
-	$(NVCC) -maxrregcount=0 --ptxas-options=-v --compile --compiler-options -fPIC -ccbin $(CXXCUDA) -m64 -O2 -I$(CUDA)/include -gencode=arch=compute_$(ccap),code=sm_$(ccap) -o $(OBJDIR)/GPU/GPUEngine.o -c GPU/GPUEngine.cu
+	@echo "Compiling GPU kernel for compute capability $(ccap)..."
+	$(NVCC) -maxrregcount=48 --ptxas-options=-v --compile --compiler-options "-fPIC -O3" -ccbin $(CXXCUDA) -m64 -O3 -I$(CUDA)/include -gencode=arch=compute_$(ccap),code=sm_$(ccap) -o $(OBJDIR)/GPU/GPUEngine.o -c GPU/GPUEngine.cu
 endif
 endif
 

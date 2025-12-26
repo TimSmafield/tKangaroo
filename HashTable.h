@@ -25,7 +25,12 @@
 #include <Windows.h>
 #endif
 
-#define HASH_SIZE_BIT 18
+// Hash table size - dramatically increased for 135-150 bit range support
+// For 135-bit range: ~2^67.5 ops, with DP=32 -> ~2^35.5 DPs needed
+// For 150-bit range: ~2^75 ops, with DP=40 -> ~2^35 DPs needed
+// 2^26 = 64M entries allows for larger ranges with reasonable RAM (~2-4 GB)
+// For extreme ranges (135+ bit), use server mode or increase this value
+#define HASH_SIZE_BIT 26
 #define HASH_SIZE (1<<HASH_SIZE_BIT)
 #define HASH_MASK (HASH_SIZE-1)
 

@@ -121,6 +121,11 @@ int _ConvertSMVer2Cores(int major,int minor) {
     { 0x70,  64 },
     { 0x72,  64 },
     { 0x75,  64 },
+    { 0x80, 64 },  // Ampere (SM 8.0) - GA100
+    { 0x86, 128 }, // Ampere (SM 8.6) - GA102, GA104, GA106, GA107
+    { 0x87, 128 }, // Ampere (SM 8.7) - Jetson Orin
+    { 0x89, 128 }, // Ada Lovelace (SM 8.9) - RTX 40xx
+    { 0x90, 128 }, // Hopper (SM 9.0) - H100
     { -1, -1 } };
 
   int index = 0;
