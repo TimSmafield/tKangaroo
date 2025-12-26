@@ -39,6 +39,17 @@ void Secp256K1::Init() {
 
   Int::InitK1(&order);
 
+  // Initialize GLV endomorphism constants for secp256k1
+  // For secp256k1: φ(x,y) = (βx, y) where β^3 = 1 mod p
+  // φ(P) = λP where λ^3 = 1 mod n
+  // These enable ~1.5-2x faster scalar multiplication
+
+  // β = cube root of unity mod p (for x-coordinate transformation)
+  beta.SetBase16("7AE96A2B657C07106E64479EAC3434E99CF0497512F58995C1396C28719501EE");
+
+  // λ = eigenvalue satisfying φ(P) = λP mod n
+  lambda.SetBase16("5363AD4CC05C30E0A5261C028812645A122E22EA20816678DF02967C1B23BD72");
+
   // Compute Generator table
   Point N(G);
   for(int i = 0; i < 32; i++) {
@@ -50,6 +61,12 @@ void Secp256K1::Init() {
     }
     GTable[i * 256 + 255] = N; // Dummy point for check function
   }
+
+  // Compute φ(G) = (β*G.x, G.y) for GLV optimization
+  PhiG.x.Set(&G.x);
+  PhiG.x.ModMulK1(&beta);
+  PhiG.y.Set(&G.y);
+  PhiG.z.SetInt32(1);
 
 }
 
@@ -567,4 +584,90 @@ bool Secp256K1::EC(Point &p) {
 
   return _s.IsZero(); // ( ((pow2(y) - (pow3(x) + 7)) % P) == 0 );
 
+}
+
+// ----------------------------------------------------------------------------
+// GLV Endomorphism Implementation
+// For secp256k1, φ(P) = (β*x, y) where φ(P) = λ*P
+// This allows decomposing k into k1 + k2*λ where k1, k2 are ~128 bits
+// ----------------------------------------------------------------------------
+
+Point Secp256K1::ApplyEndomorphism(Point &p) {
+  // Apply the endomorphism φ(x,y) = (β*x mod p, y)
+  // This is equivalent to computing λ*P but costs only 1 field multiplication
+  Point result;
+  result.x.Set(&p.x);
+  result.x.ModMulK1(&beta);
+  result.y.Set(&p.y);
+  result.z.Set(&p.z);
+  return result;
+}
+
+void Secp256K1::GLVDecompose(Int *k, Int *k1, Int *k2) {
+  // Decompose scalar k into k1 + k2*λ (mod n) where k1, k2 are ~128 bits
+  // Uses the lattice basis for secp256k1:
+  //
+  // v1 = (a1, -b1) where a1 = 0x3086D221A7D46BCDE86C90E49284EB15
+  //                      b1 = 0xE4437ED6010E88286F547FA90ABFE4C3
+  // v2 = (a2, b2)  where a2 = 0x114CA50F7A8E2F3F657C1108D9D44CFD8
+  //                      b2 = a1
+  //
+  // Algorithm: k1 = k - c1*a1 - c2*a2
+  //            k2 = -c1*b1 + c2*b2
+  // where c1 = round(k*b2/n), c2 = round(k*b1/n)
+
+  // Lattice constants for secp256k1 (precomputed)
+  Int a1, b1, a2, b2;
+  a1.SetBase16("3086D221A7D46BCDE86C90E49284EB15");
+  b1.SetBase16("E4437ED6010E88286F547FA90ABFE4C3");
+  a2.SetBase16("114CA50F7A8E2F3F657C1108D9D44CFD8");
+  b2.Set(&a1);  // b2 = a1
+
+  // For efficiency, we use the simplified round-divide approach:
+  // c1 ≈ k*b2/n, c2 ≈ k*b1/n
+  //
+  // Using the property that for secp256k1:
+  // n ≈ 2^256, b1 ≈ b2 ≈ 2^128
+  // So c1, c2 can be computed by taking high bits of k*b1, k*b2
+
+  Int c1, c2, t1, t2;
+
+  // c1 = round((k * b2) / n)
+  // Approximate: c1 = (k * b2) >> 256 (taking high bits)
+  c1.Mult(k, &b2);
+  c1.ShiftR(256);  // Divide by 2^256 ≈ n
+
+  // c2 = round((k * b1) / n)
+  c2.Mult(k, &b1);
+  c2.ShiftR(256);
+
+  // k1 = k - c1*a1 - c2*a2
+  t1.Mult(&c1, &a1);
+  t2.Mult(&c2, &a2);
+  k1->Set(k);
+  k1->Sub(&t1);
+  k1->Sub(&t2);
+
+  // k2 = c1*b1 - c2*b2
+  // Note: With sign handling for λ multiplication
+  t1.Mult(&c1, &b1);
+  t2.Mult(&c2, &b2);
+  k2->Sub(&t1, &t2);
+  k2->Neg();  // k2 = -c1*b1 + c2*b2
+
+  // Handle negative results by adding n
+  if(k1->IsNegative()) {
+    k1->Add(&order);
+  }
+  if(k2->IsNegative()) {
+    k2->Add(&order);
+  }
+
+  // Reduce to ensure k1, k2 are within bounds
+  if(k1->IsGreaterOrEqual(&order)) {
+    k1->Sub(&order);
+  }
+  if(k2->IsGreaterOrEqual(&order)) {
+    k2->Sub(&order);
+  }
 }

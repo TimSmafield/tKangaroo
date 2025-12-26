@@ -45,8 +45,19 @@ public:
 
   std::vector<Point> AddDirect(std::vector<Point> &p1,std::vector<Point> &p2);
 
+  // GLV Endomorphism support for faster computation
+  // For secp256k1: φ(x,y) = (βx, y) where β^3 = 1 mod p
+  // φ(P) = λP where λ^3 = 1 mod n
+  Point ApplyEndomorphism(Point &p);           // Compute φ(P) = (βx, y)
+  void  GLVDecompose(Int *k, Int *k1, Int *k2); // Decompose k = k1 + k2*λ
+
   Point G;                 // Generator
+  Point PhiG;              // φ(G) = Endomorphism of generator
   Int   order;             // Curve order
+
+  // GLV constants
+  Int beta;                // β: cube root of unity mod p (x-coordinate multiplier)
+  Int lambda;              // λ: eigenvalue satisfying φ(P) = λP mod n
 
 private:
 
