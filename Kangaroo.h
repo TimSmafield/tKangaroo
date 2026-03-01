@@ -38,6 +38,7 @@ typedef int SOCKET;
 
 #include <string>
 #include <vector>
+#include <signal.h>
 #include "SECPK1/SECP256k1.h"
 #include "HashTable.h"
 #include "SECPK1/IntGroup.h"
@@ -54,6 +55,7 @@ typedef pthread_t THREAD_HANDLE;
 #endif
 
 class Kangaroo;
+extern volatile sig_atomic_t g_stopRequested;
 
 // Input thread parameters
 typedef struct {

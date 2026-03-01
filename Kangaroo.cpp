@@ -30,6 +30,13 @@
 using namespace std;
 
 #define safe_delete_array(x) if(x) {delete[] x;x=NULL;}
+volatile sig_atomic_t g_stopRequested = 0;
+
+static void solver_sig_handler(int signo) {
+  if(signo == SIGINT || signo == SIGTERM) {
+    g_stopRequested = 1;
+  }
+}
 
 // ----------------------------------------------------------------------------
 
@@ -913,6 +920,12 @@ void Kangaroo::InitSearchKey() {
 void Kangaroo::Run(int nbThread,std::vector<int> gpuId,std::vector<int> gridSize) {
 
   double t0 = Timer::get_tick();
+  g_stopRequested = 0;
+
+  if(signal(SIGINT,solver_sig_handler) == SIG_ERR)
+    ::printf("\nWarning: can't install SIGINT handler\n");
+  if(signal(SIGTERM,solver_sig_handler) == SIG_ERR)
+    ::printf("\nWarning: can't install SIGTERM handler\n");
 
   nbCPUThread = nbThread;
   nbGPUThread = (useGpu ? (int)gpuId.size() : 0);

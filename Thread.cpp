@@ -180,6 +180,14 @@ void Kangaroo::ProcessServer() {
 
   while(!endOfSearch) {
 
+    if(g_stopRequested && !endOfSearch) {
+      ::printf("\nSignal received, stopping server gracefully...\n");
+      if(workFile.length() > 0)
+        SaveServerWork();
+      endOfSearch = true;
+      break;
+    }
+
     t0 = Timer::get_tick();
 
     LOCK(ghMutex);
@@ -264,8 +272,13 @@ void Kangaroo::Process(TH_PARAM *params,std::string unit) {
   memset(lastGpukeyRate,0,sizeof(lastkeyRate));
 
   // Wait that all threads have started
-  while(!hasStarted(params))
+  while(!hasStarted(params)) {
+    if(g_stopRequested) {
+      endOfSearch = true;
+      break;
+    }
     Timer::SleepMillis(5);
+  }
 
   t0 = Timer::get_tick();
   startTime = t0;
@@ -282,8 +295,15 @@ void Kangaroo::Process(TH_PARAM *params,std::string unit) {
 
     gpuCount = getGPUCount();
     count = getCPUCount() + gpuCount;
-
     t1 = Timer::get_tick();
+
+    if(g_stopRequested && !endOfSearch) {
+      ::printf("\nSignal received, stopping gracefully...\n");
+      if(workFile.length() > 0)
+        SaveWork(count + offsetCount,t1 - startTime + offsetTime,params,nbCPUThread + nbGPUThread);
+      endOfSearch = true;
+    }
+
     keyRate = (double)(count - lastCount) / (t1 - t0);
     gpuKeyRate = (double)(gpuCount - lastGPUCount) / (t1 - t0);
     lastkeyRate[filterPos%FILTER_SIZE] = keyRate;

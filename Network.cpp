@@ -107,13 +107,16 @@ string GetNetworkError() {
 #define PUTFREE(name,s,b,bl,t,x)  if( (nbWrite=Write(s,(char *)(b),bl,t))<0 ) { ::printf("\nWriteError(" name "): %s\n",lastError.c_str()); isConnected = false; ::free(x); close_socket(s); return false; }
 
 void sig_handler(int signo) {
-  if(signo == SIGINT) {
-    ::printf("\nTerminated\n");
-    if(serverSock>0) close_socket(serverSock);
+  if(signo == SIGINT || signo == SIGTERM) {
+    g_stopRequested = 1;
+    ::printf("\nSignal received, requesting graceful shutdown...\n");
+    if(serverSock>0) {
+      close_socket(serverSock);
+      serverSock = 0;
+    }
 #ifdef WIN64
     WSACleanup();
 #endif
-    exit(0);
   }
 }
 
@@ -259,7 +262,7 @@ void Kangaroo::InitSocket() {
 // Server status
 int32_t Kangaroo::GetServerStatus() {
 
-  if(endOfSearch) {
+  if(endOfSearch || g_stopRequested) {
     return SERVER_END;
   }
 
@@ -285,7 +288,7 @@ bool Kangaroo::HandleRequest(TH_PARAM *p) {
   int nbWrite;
   int32_t state;
 
-  while( p->isRunning ) {
+  while( p->isRunning && !g_stopRequested ) {
 
     // Wait for command (1h timeout)
     nbRead = Read(p->clientSock,(char *)(&cmdBuff),1,(int)(CLIENT_TIMEOUT*1000.0));
@@ -645,13 +648,15 @@ void Kangaroo::AcceptConnections(SOCKET server_soc) {
 
   ::printf("Kangaroo server is ready and listening to TCP port %d ...\n",port);
 
-  while(true) {
+  while(!g_stopRequested) {
 
     struct sockaddr_in client_add;
     socklen_t len = sizeof(sockaddr_in);
 
     if((clientSock = accept(server_soc,(struct sockaddr*)&client_add,&len)) < 0) {
 
+      if(g_stopRequested)
+        break;
       ::printf("Error: Invalid Socket returned by accept(): %s\n",GetNetworkError().c_str());
 
     } else {
@@ -674,13 +679,20 @@ void Kangaroo::AcceptConnections(SOCKET server_soc) {
 
   }
 
+  if(server_soc > 0)
+    close_socket(server_soc);
+
 }
 
 // Starts the server
 void Kangaroo::RunServer() {
 
+  g_stopRequested = 0;
+
   if(signal(SIGINT,sig_handler) == SIG_ERR)
     ::printf("\nWarning:can't install singal handler\n");
+  if(signal(SIGTERM,sig_handler) == SIG_ERR)
+    ::printf("\nWarning:can't install signal handler\n");
 
   // Set starting parameters
   InitRange();
@@ -774,6 +786,8 @@ bool Kangaroo::ConnectToServer(SOCKET *retSock) {
 
     if(signal(SIGINT,sig_handler) == SIG_ERR)
       ::printf("\nWarning:can't install singal handler\n");
+    if(signal(SIGTERM,sig_handler) == SIG_ERR)
+      ::printf("\nWarning:can't install signal handler\n");
 
     InitSocket();
 
