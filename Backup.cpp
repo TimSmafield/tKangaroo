@@ -70,6 +70,41 @@ bool FlushAndCloseFile(const std::string& fileName, FILE* f) {
   return true;
 }
 
+#ifndef WIN64
+bool SyncParentDirectory(const std::string& fileName) {
+
+  std::string dirName = ".";
+  size_t pos = fileName.find_last_of('/');
+  if(pos == 0) {
+    dirName = "/";
+  } else if(pos != std::string::npos) {
+    dirName = fileName.substr(0,pos);
+  }
+
+  int dfd = ::open(dirName.c_str(),O_RDONLY);
+  if(dfd < 0) {
+    ::printf("\nSaveWork: cannot open parent directory %s for sync\n",dirName.c_str());
+    ::printf("%s\n",::strerror(errno));
+    return false;
+  }
+
+  int ret = ::fsync(dfd);
+  int closeRet = ::close(dfd);
+  if(ret != 0) {
+    ::printf("\nSaveWork: parent directory fsync failed on %s\n",dirName.c_str());
+    ::printf("%s\n",::strerror(errno));
+    return false;
+  }
+  if(closeRet != 0) {
+    ::printf("\nSaveWork: closing parent directory handle failed on %s\n",dirName.c_str());
+    ::printf("%s\n",::strerror(errno));
+    return false;
+  }
+
+  return true;
+}
+#endif
+
 bool AtomicReplaceFile(const std::string& targetFileName,const std::string& tmpFileName) {
 
 #ifdef WIN64
@@ -83,6 +118,10 @@ bool AtomicReplaceFile(const std::string& targetFileName,const std::string& tmpF
     ::printf("\nSaveWork: atomic replace failed (%s -> %s)\n",tmpFileName.c_str(),targetFileName.c_str());
     ::printf("%s\n",::strerror(errno));
     ::remove(tmpFileName.c_str());
+    return false;
+  }
+
+  if(!SyncParentDirectory(targetFileName)) {
     return false;
   }
 #endif
