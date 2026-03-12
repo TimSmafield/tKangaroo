@@ -23,12 +23,74 @@
 #define _USE_MATH_DEFINES
 #include <math.h>
 #include <algorithm>
+#include <errno.h>
 #ifndef WIN64
 #include <pthread.h>
 #include <sys/stat.h>
+#include <unistd.h>
+#else
+#include <io.h>
 #endif
 
 using namespace std;
+
+namespace {
+
+bool FlushAndCloseFile(const std::string& fileName, FILE* f) {
+
+  if(::fflush(f) != 0) {
+    ::printf("\nSaveWork: fflush failed on %s\n",fileName.c_str());
+    ::printf("%s\n",::strerror(errno));
+    ::fclose(f);
+    return false;
+  }
+
+#ifdef WIN64
+  if(_commit(_fileno(f)) != 0) {
+    ::printf("\nSaveWork: _commit failed on %s\n",fileName.c_str());
+    ::printf("%s\n",::strerror(errno));
+    ::fclose(f);
+    return false;
+  }
+#else
+  if(::fsync(::fileno(f)) != 0) {
+    ::printf("\nSaveWork: fsync failed on %s\n",fileName.c_str());
+    ::printf("%s\n",::strerror(errno));
+    ::fclose(f);
+    return false;
+  }
+#endif
+
+  if(::fclose(f) != 0) {
+    ::printf("\nSaveWork: fclose failed on %s\n",fileName.c_str());
+    ::printf("%s\n",::strerror(errno));
+    return false;
+  }
+
+  return true;
+}
+
+bool AtomicReplaceFile(const std::string& targetFileName,const std::string& tmpFileName) {
+
+#ifdef WIN64
+  if(!::MoveFileExA(tmpFileName.c_str(),targetFileName.c_str(),MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+    ::printf("\nSaveWork: atomic replace failed (%s -> %s), GetLastError=%lu\n",tmpFileName.c_str(),targetFileName.c_str(),(unsigned long)::GetLastError());
+    ::remove(tmpFileName.c_str());
+    return false;
+  }
+#else
+  if(::rename(tmpFileName.c_str(),targetFileName.c_str()) != 0) {
+    ::printf("\nSaveWork: atomic replace failed (%s -> %s)\n",tmpFileName.c_str(),targetFileName.c_str());
+    ::printf("%s\n",::strerror(errno));
+    ::remove(tmpFileName.c_str());
+    return false;
+  }
+#endif
+
+  return true;
+}
+
+} // namespace
 
 
 // ----------------------------------------------------------------------------
@@ -409,30 +471,44 @@ void  Kangaroo::SaveWork(string fileName,FILE *f,int type,uint64_t totalCount,do
 void Kangaroo::SaveServerWork() {
 
   saveRequest = true;
+  bool saveOk = true;
 
   double t0 = Timer::get_tick();
 
   string fileName = workFile;
   if(splitWorkfile)
     fileName = workFile + "_" + Timer::getTS();
+  string tmpFileName = fileName + ".tmp";
 
-  FILE *f = fopen(fileName.c_str(),"wb");
+  FILE *f = fopen(tmpFileName.c_str(),"wb");
   if(f == NULL) {
-    ::printf("\nSaveWork: Cannot open %s for writing\n",fileName.c_str());
+    ::printf("\nSaveWork: Cannot open %s for writing\n",tmpFileName.c_str());
     ::printf("%s\n",::strerror(errno));
     saveRequest = false;
     return;
   }
 
-  SaveWork(fileName,f,HEADW,0,0);
+  SaveWork(tmpFileName,f,HEADW,0,0);
 
   uint64_t totalWalk = 0;
-  ::fwrite(&totalWalk,sizeof(uint64_t),1,f);
+  if(::fwrite(&totalWalk,sizeof(uint64_t),1,f) != 1)
+    saveOk = false;
+
+  if(::ferror(f))
+    saveOk = false;
 
   uint64_t size = FTell(f);
-  fclose(f);
+  if(saveOk)
+    saveOk = FlushAndCloseFile(tmpFileName,f);
+  else
+    ::fclose(f);
 
-  if(splitWorkfile)
+  if(saveOk)
+    saveOk = AtomicReplaceFile(fileName,tmpFileName);
+  else
+    ::remove(tmpFileName.c_str());
+
+  if(splitWorkfile && saveOk)
     hashTable.Reset();
 
   double t1 = Timer::get_tick();
@@ -440,7 +516,10 @@ void Kangaroo::SaveServerWork() {
   char *ctimeBuff;
   time_t now = time(NULL);
   ctimeBuff = ctime(&now);
-  ::printf("done [%.1f MB] [%s] %s",(double)size / (1024.0*1024.0),GetTimeStr(t1 - t0).c_str(),ctimeBuff);
+  if(saveOk)
+    ::printf("done [%.1f MB] [%s] %s",(double)size / (1024.0*1024.0),GetTimeStr(t1 - t0).c_str(),ctimeBuff);
+  else
+    ::printf("failed [%s] %s",GetTimeStr(t1 - t0).c_str(),ctimeBuff);
 
   saveRequest = false;
 
@@ -474,13 +553,15 @@ void Kangaroo::SaveWork(uint64_t totalCount,double totalTime,TH_PARAM *threads,i
   string fileName = workFile;
   if(splitWorkfile)
     fileName = workFile + "_" + Timer::getTS();
+  string tmpFileName = fileName + ".tmp";
+  bool saveOk = true;
 
   // Save
   FILE* f = NULL;
   if(!saveKangarooByServer) {
-    f = fopen(fileName.c_str(),"wb");
+    f = fopen(tmpFileName.c_str(),"wb");
     if(f == NULL) {
-      ::printf("\nSaveWork: Cannot open %s for writing\n",fileName.c_str());
+      ::printf("\nSaveWork: Cannot open %s for writing\n",tmpFileName.c_str());
       ::printf("%s\n",::strerror(errno));
       UNLOCK(saveMutex);
       return;
@@ -511,13 +592,13 @@ void Kangaroo::SaveWork(uint64_t totalCount,double totalTime,TH_PARAM *threads,i
       goto end;
 
     } else {
-      SaveHeader(fileName,f,HEADK,totalCount,totalTime);
+      saveOk = SaveHeader(tmpFileName,f,HEADK,totalCount,totalTime);
       ::printf("\nSaveWork (Kangaroo): %s",fileName.c_str());
     }
 
   } else {
 
-    SaveWork(fileName,f,HEADW,totalCount,totalTime);
+    SaveWork(tmpFileName,f,HEADW,totalCount,totalTime);
 
   }
 
@@ -527,16 +608,17 @@ void Kangaroo::SaveWork(uint64_t totalCount,double totalTime,TH_PARAM *threads,i
     // Save kangaroos
     for(int i = 0; i < nbThread; i++)
       totalWalk += threads[i].nbKangaroo;
-    ::fwrite(&totalWalk,sizeof(uint64_t),1,f);
+    if(::fwrite(&totalWalk,sizeof(uint64_t),1,f) != 1)
+      saveOk = false;
 
     uint64_t point = totalWalk / 16;
     uint64_t pointPrint = 0;
 
     for(int i = 0; i < nbThread; i++) {
       for(uint64_t n = 0; n < threads[i].nbKangaroo; n++) {
-        ::fwrite(&threads[i].px[n].bits64,32,1,f);
-        ::fwrite(&threads[i].py[n].bits64,32,1,f);
-        ::fwrite(&threads[i].distance[n].bits64,32,1,f);
+        if(::fwrite(&threads[i].px[n].bits64,32,1,f) != 1) saveOk = false;
+        if(::fwrite(&threads[i].py[n].bits64,32,1,f) != 1) saveOk = false;
+        if(::fwrite(&threads[i].distance[n].bits64,32,1,f) != 1) saveOk = false;
         pointPrint++;
         if(pointPrint>point) {
           ::printf(".");
@@ -547,14 +629,26 @@ void Kangaroo::SaveWork(uint64_t totalCount,double totalTime,TH_PARAM *threads,i
 
   } else {
 
-    ::fwrite(&totalWalk,sizeof(uint64_t),1,f);
+    if(::fwrite(&totalWalk,sizeof(uint64_t),1,f) != 1)
+      saveOk = false;
 
   }
 
-  size = FTell(f);
-  fclose(f);
+  if(::ferror(f))
+    saveOk = false;
 
-  if(splitWorkfile)
+  size = FTell(f);
+  if(saveOk)
+    saveOk = FlushAndCloseFile(tmpFileName,f);
+  else
+    ::fclose(f);
+
+  if(saveOk)
+    saveOk = AtomicReplaceFile(fileName,tmpFileName);
+  else
+    ::remove(tmpFileName.c_str());
+
+  if(splitWorkfile && saveOk)
     hashTable.Reset();
 
   // Unblock threads
@@ -567,7 +661,10 @@ end:
   char *ctimeBuff;
   time_t now = time(NULL);
   ctimeBuff = ctime(&now);
-  ::printf("done [%.1f MB] [%s] %s",(double)size/(1024.0*1024.0),GetTimeStr(t1 - t0).c_str(),ctimeBuff);
+  if(saveOk)
+    ::printf("done [%.1f MB] [%s] %s",(double)size/(1024.0*1024.0),GetTimeStr(t1 - t0).c_str(),ctimeBuff);
+  else
+    ::printf("failed [%s] %s",GetTimeStr(t1 - t0).c_str(),ctimeBuff);
 
 }
 
