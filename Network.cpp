@@ -685,9 +685,10 @@ void Kangaroo::AcceptConnections(SOCKET server_soc) {
 }
 
 // Starts the server
-void Kangaroo::RunServer() {
+RunResult Kangaroo::RunServer() {
 
   g_stopRequested = 0;
+  SetRunResult(RESULT_NO_KEY);
 
   if(signal(SIGINT,sig_handler) == SIG_ERR)
     ::printf("\nWarning:can't install singal handler\n");
@@ -704,18 +705,21 @@ void Kangaroo::RunServer() {
 
   if(initDPSize<0) {
     ::printf("Error: Server must be launched with a specified number of distinguished bits (-d)\n");
-    exit(-1);
+    SetRunResult(RESULT_INVALID_INPUT);
+    return GetRunResult();
   }
   SetDP(initDPSize);
 
   if(sizeof(DP) != 40) {
     ::printf("Error: Invalid DP size struct\n");
-    exit(-1);
+    SetRunResult(RESULT_FATAL_ERROR);
+    return GetRunResult();
   }
 
   if(sizeof(DPHEADER) != 20) {
     ::printf("Error: Invalid DPHEADER size struct\n");
-    exit(-1);
+    SetRunResult(RESULT_FATAL_ERROR);
+    return GetRunResult();
   }
 
   if(saveKangaroo) {
@@ -736,7 +740,8 @@ void Kangaroo::RunServer() {
 
   if(serverSock<0) {
     ::printf("Error: Invalid socket : %s\n",GetNetworkError().c_str());
-    exit(-1);
+    SetRunResult(RESULT_RUNTIME_ERROR);
+    return GetRunResult();
   }
 
   struct sockaddr_in soc_addr;
@@ -754,12 +759,14 @@ void Kangaroo::RunServer() {
 
   if(bind(serverSock,(struct sockaddr*)&soc_addr,sizeof(soc_addr))) {
     ::printf("Error: Can not bind socket. Another server running?\n%s\n",GetNetworkError().c_str());
-    exit(-1);
+    SetRunResult(RESULT_RUNTIME_ERROR);
+    return GetRunResult();
   }
 
   if(listen(serverSock,MAX_CLIENT)<0) {
     ::printf("Error: Can not listen to socket\n%s\n",GetNetworkError().c_str());
-    exit(-1);
+    SetRunResult(RESULT_RUNTIME_ERROR);
+    return GetRunResult();
   }
 
   AcceptConnections(serverSock);
@@ -768,7 +775,10 @@ void Kangaroo::RunServer() {
   WSACleanup();
 #endif
 
-  return;
+  if(g_stopRequested && GetRunResult() == RESULT_NO_KEY)
+    SetRunResult(RESULT_RUNTIME_ERROR);
+
+  return GetRunResult();
 
 }
 

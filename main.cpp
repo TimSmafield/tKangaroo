@@ -164,7 +164,33 @@ static string serverIP = "";
 static string outputFile = "";
 static bool splitWorkFile = false;
 
+static int RunResultToExitCode(RunResult result) {
+
+  switch(result) {
+    case RESULT_NO_KEY:
+      return 0;
+    case RESULT_KEY_FOUND:
+      return 10;
+    case RESULT_INVALID_INPUT:
+      return 20;
+    case RESULT_BAD_WORKFILE:
+      return 21;
+    case RESULT_RUNTIME_ERROR:
+      return 30;
+    case RESULT_SIGNAL_SAVE_OK:
+      return 40;
+    case RESULT_SIGNAL_SAVE_FAILED:
+      return 41;
+    case RESULT_FATAL_ERROR:
+    default:
+      return 50;
+  }
+
+}
+
 int main(int argc, char* argv[]) {
+
+  try {
 
 #ifdef USE_SYMMETRY
   printf("Kangaroo v" RELEASE " (with symmetry)\n");
@@ -348,12 +374,22 @@ int main(int argc, char* argv[]) {
         exit(-1);
       }
     }
+    RunResult result;
     if(serverMode)
-      v->RunServer();
+      result = v->RunServer();
     else
-      v->Run(nbCPUThread,gpuId,gridSize);
+      result = v->Run(nbCPUThread,gpuId,gridSize);
+    return RunResultToExitCode(result);
   }
 
   return 0;
+
+  } catch(const std::exception& e) {
+    fprintf(stderr,"Fatal error: %s\n",e.what());
+    return RunResultToExitCode(RESULT_FATAL_ERROR);
+  } catch(...) {
+    fprintf(stderr,"Fatal error: unexpected exception\n");
+    return RunResultToExitCode(RESULT_FATAL_ERROR);
+  }
 
 }
