@@ -182,8 +182,12 @@ void Kangaroo::ProcessServer() {
 
     if(g_stopRequested && !endOfSearch) {
       ::printf("\nSignal received, stopping server gracefully...\n");
-      if(workFile.length() > 0)
-        SaveServerWork();
+      if(GetRunResult() != RESULT_KEY_FOUND) {
+        bool saveOk = true;
+        if(workFile.length() > 0)
+          saveOk = SaveServerWork();
+        SetRunResult(saveOk ? RESULT_SIGNAL_SAVE_OK : RESULT_SIGNAL_SAVE_FAILED);
+      }
       endOfSearch = true;
       break;
     }
@@ -299,8 +303,12 @@ void Kangaroo::Process(TH_PARAM *params,std::string unit) {
 
     if(g_stopRequested && !endOfSearch) {
       ::printf("\nSignal received, stopping gracefully...\n");
-      if(workFile.length() > 0)
-        SaveWork(count + offsetCount,t1 - startTime + offsetTime,params,nbCPUThread + nbGPUThread);
+      if(GetRunResult() != RESULT_KEY_FOUND) {
+        bool saveOk = true;
+        if(workFile.length() > 0)
+          saveOk = SaveWork(count + offsetCount,t1 - startTime + offsetTime,params,nbCPUThread + nbGPUThread);
+        SetRunResult(saveOk ? RESULT_SIGNAL_SAVE_OK : RESULT_SIGNAL_SAVE_FAILED);
+      }
       endOfSearch = true;
     }
 

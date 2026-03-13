@@ -191,9 +191,9 @@ private:
   bool Output(Int* pk,char sInfo,int sType);
 
   // Backup stuff
-  void SaveWork(std::string fileName,FILE *f,int type,uint64_t totalCount,double totalTime);
-  void SaveWork(uint64_t totalCount,double totalTime,TH_PARAM *threads,int nbThread);
-  void SaveServerWork();
+  bool SaveWork(std::string fileName,FILE *f,int type,uint64_t totalCount,double totalTime);
+  bool SaveWork(uint64_t totalCount,double totalTime,TH_PARAM *threads,int nbThread);
+  bool SaveServerWork();
   void FetchWalks(uint64_t nbWalk,Int *x,Int *y,Int *d);
   void FetchWalks(uint64_t nbWalk,std::vector<int128_t>& kangs,Int* x,Int* y,Int* d);
   void FectchKangaroos(TH_PARAM *threads);
