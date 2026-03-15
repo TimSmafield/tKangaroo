@@ -389,7 +389,7 @@ void Kangaroo::FetchWalks(uint64_t nbWalk,std::vector<int128_t>& kangs,Int* x,In
 
 }
 
-void Kangaroo::FectchKangaroos(TH_PARAM *threads) {
+bool Kangaroo::FectchKangaroos(TH_PARAM *threads) {
 
   double sFetch = Timer::get_tick();
 
@@ -398,7 +398,7 @@ void Kangaroo::FectchKangaroos(TH_PARAM *threads) {
   if(saveKangarooByServer) {
     ::printf("FectchKangaroosFromServer");
     if(!GetKangaroosFromServer(workFile,kangs))
-      ::exit(0);
+      return false;
     ::printf("Done\n");
     nbLoadedWalk = kangs.size();
   }
@@ -461,6 +461,7 @@ void Kangaroo::FectchKangaroos(TH_PARAM *threads) {
 
   // Close input file
   if(fRead) fclose(fRead);
+  return true;
 
 }
 

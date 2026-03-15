@@ -1038,7 +1038,10 @@ RunResult Kangaroo::Run(int nbThread,std::vector<int> gpuId,std::vector<int> gri
   SetDP(initDPSize);
 
   // Fetch kangaroos (if any)
-  FectchKangaroos(params);
+  if(!FectchKangaroos(params)) {
+    SetRunResult(RESULT_RUNTIME_ERROR);
+    return GetRunResult();
+  }
 
 //#define STATS
 #ifdef STATS
