@@ -57,6 +57,17 @@ typedef pthread_t THREAD_HANDLE;
 class Kangaroo;
 extern volatile sig_atomic_t g_stopRequested;
 
+enum RunResult {
+  RESULT_NO_KEY = 0,
+  RESULT_KEY_FOUND,
+  RESULT_INVALID_INPUT,
+  RESULT_BAD_WORKFILE,
+  RESULT_RUNTIME_ERROR,
+  RESULT_SIGNAL_SAVE_OK,
+  RESULT_SIGNAL_SAVE_FAILED,
+  RESULT_FATAL_ERROR
+};
+
 // Input thread parameters
 typedef struct {
 
@@ -133,8 +144,8 @@ public:
   Kangaroo(Secp256K1 *secp,int32_t initDPSize,bool useGpu,std::string &workFile,std::string &iWorkFile,
            uint32_t savePeriod,bool saveKangaroo,bool saveKangarooByServer,double maxStep,int wtimeout,int sport,int ntimeout,
            std::string serverIp,std::string outputFile,bool splitWorkfile);
-  void Run(int nbThread,std::vector<int> gpuId,std::vector<int> gridSize);
-  void RunServer();
+  RunResult Run(int nbThread,std::vector<int> gpuId,std::vector<int> gridSize);
+  RunResult RunServer();
   bool ParseConfigFile(std::string &fileName);
   bool LoadWork(std::string &fileName);
   void Check(std::vector<int> gpuId,std::vector<int> gridSize);
@@ -160,6 +171,7 @@ public:
   void AddConnectedClient();
   void RemoveConnectedClient();
   void RemoveConnectedKangaroo(uint64_t nb);
+  RunResult GetRunResult() const;
 
 private:
 
@@ -179,12 +191,12 @@ private:
   bool Output(Int* pk,char sInfo,int sType);
 
   // Backup stuff
-  void SaveWork(std::string fileName,FILE *f,int type,uint64_t totalCount,double totalTime);
-  void SaveWork(uint64_t totalCount,double totalTime,TH_PARAM *threads,int nbThread);
-  void SaveServerWork();
+  bool SaveWork(std::string fileName,FILE *f,int type,uint64_t totalCount,double totalTime);
+  bool SaveWork(uint64_t totalCount,double totalTime,TH_PARAM *threads,int nbThread);
+  bool SaveServerWork();
   void FetchWalks(uint64_t nbWalk,Int *x,Int *y,Int *d);
   void FetchWalks(uint64_t nbWalk,std::vector<int128_t>& kangs,Int* x,Int* y,Int* d);
-  void FectchKangaroos(TH_PARAM *threads);
+  bool FectchKangaroos(TH_PARAM *threads);
   FILE *ReadHeader(std::string fileName,uint32_t *version,int type);
   bool  SaveHeader(std::string fileName,FILE* f,int type,uint64_t totalCount,double totalTime);
   int FSeek(FILE *stream,uint64_t pos);
@@ -203,7 +215,7 @@ private:
   int Read(SOCKET sock,char *buf,int bufsize,int timeout);
   bool GetConfigFromServer();
   bool ConnectToServer(SOCKET *retSock);
-  void InitSocket();
+  bool InitSocket();
   void WaitForServer();
   int32_t GetServerStatus();
   bool SendKangaroosToServer(std::string& fileName,std::vector<int128_t>& kangs);
@@ -228,6 +240,7 @@ private:
   bool isAlive(TH_PARAM *p);
   bool hasStarted(TH_PARAM *p);
   bool isWaiting(TH_PARAM *p);
+  void SetRunResult(RunResult result);
 
   Secp256K1 *secp;
   HashTable hashTable;
@@ -297,6 +310,7 @@ private:
   std::string serverStatus;
   int connectedClient;
   uint32_t pid;
+  RunResult runResult;
 
 };
 

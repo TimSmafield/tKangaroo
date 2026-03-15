@@ -389,7 +389,7 @@ void Kangaroo::FetchWalks(uint64_t nbWalk,std::vector<int128_t>& kangs,Int* x,In
 
 }
 
-void Kangaroo::FectchKangaroos(TH_PARAM *threads) {
+bool Kangaroo::FectchKangaroos(TH_PARAM *threads) {
 
   double sFetch = Timer::get_tick();
 
@@ -398,7 +398,7 @@ void Kangaroo::FectchKangaroos(TH_PARAM *threads) {
   if(saveKangarooByServer) {
     ::printf("FectchKangaroosFromServer");
     if(!GetKangaroosFromServer(workFile,kangs))
-      ::exit(0);
+      return false;
     ::printf("Done\n");
     nbLoadedWalk = kangs.size();
   }
@@ -461,6 +461,7 @@ void Kangaroo::FectchKangaroos(TH_PARAM *threads) {
 
   // Close input file
   if(fRead) fclose(fRead);
+  return true;
 
 }
 
@@ -494,20 +495,21 @@ bool Kangaroo::SaveHeader(string fileName,FILE* f,int type,uint64_t totalCount,d
   return true;
 }
 
-void  Kangaroo::SaveWork(string fileName,FILE *f,int type,uint64_t totalCount,double totalTime) {
+bool Kangaroo::SaveWork(string fileName,FILE *f,int type,uint64_t totalCount,double totalTime) {
 
   ::printf("\nSaveWork: %s",fileName.c_str());
 
   // Header
   if(!SaveHeader(fileName,f,type,totalCount,totalTime))
-    return;
+    return false;
 
   // Save hash table
   hashTable.SaveTable(f);
+  return !::ferror(f);
 
 }
 
-void Kangaroo::SaveServerWork() {
+bool Kangaroo::SaveServerWork() {
 
   saveRequest = true;
   bool saveOk = true;
@@ -524,10 +526,11 @@ void Kangaroo::SaveServerWork() {
     ::printf("\nSaveWork: Cannot open %s for writing\n",tmpFileName.c_str());
     ::printf("%s\n",::strerror(errno));
     saveRequest = false;
-    return;
+    return false;
   }
 
-  SaveWork(tmpFileName,f,HEADW,0,0);
+  if(!SaveWork(tmpFileName,f,HEADW,0,0))
+    saveOk = false;
 
   uint64_t totalWalk = 0;
   if(::fwrite(&totalWalk,sizeof(uint64_t),1,f) != 1)
@@ -561,10 +564,11 @@ void Kangaroo::SaveServerWork() {
     ::printf("failed [%s] %s",GetTimeStr(t1 - t0).c_str(),ctimeBuff);
 
   saveRequest = false;
+  return saveOk;
 
 }
 
-void Kangaroo::SaveWork(uint64_t totalCount,double totalTime,TH_PARAM *threads,int nbThread) {
+bool Kangaroo::SaveWork(uint64_t totalCount,double totalTime,TH_PARAM *threads,int nbThread) {
 
   uint64_t totalWalk = 0;
   uint64_t size;
@@ -585,8 +589,9 @@ void Kangaroo::SaveWork(uint64_t totalCount,double totalTime,TH_PARAM *threads,i
     // Thread blocked or ended !
     if(!endOfSearch)
       ::printf("\nSaveWork timeout !\n");
+    saveRequest = false;
     UNLOCK(saveMutex);
-    return;
+    return false;
   }
 
   string fileName = workFile;
@@ -602,8 +607,9 @@ void Kangaroo::SaveWork(uint64_t totalCount,double totalTime,TH_PARAM *threads,i
     if(f == NULL) {
       ::printf("\nSaveWork: Cannot open %s for writing\n",tmpFileName.c_str());
       ::printf("%s\n",::strerror(errno));
+      saveRequest = false;
       UNLOCK(saveMutex);
-      return;
+      return false;
     }
   }
 
@@ -626,7 +632,7 @@ void Kangaroo::SaveWork(uint64_t totalCount,double totalTime,TH_PARAM *threads,i
           kangs.push_back(D);
         }
       }
-      SendKangaroosToServer(fileName,kangs);
+      saveOk = SendKangaroosToServer(fileName,kangs);
       size = kangs.size()*16 + 16;
       goto end;
 
@@ -637,7 +643,7 @@ void Kangaroo::SaveWork(uint64_t totalCount,double totalTime,TH_PARAM *threads,i
 
   } else {
 
-    SaveWork(tmpFileName,f,HEADW,totalCount,totalTime);
+    saveOk = SaveWork(tmpFileName,f,HEADW,totalCount,totalTime);
 
   }
 
@@ -704,6 +710,8 @@ end:
     ::printf("done [%.1f MB] [%s] %s",(double)size/(1024.0*1024.0),GetTimeStr(t1 - t0).c_str(),ctimeBuff);
   else
     ::printf("failed [%s] %s",GetTimeStr(t1 - t0).c_str(),ctimeBuff);
+
+  return saveOk;
 
 }
 

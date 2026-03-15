@@ -241,7 +241,7 @@ int Kangaroo::Read(SOCKET sock,char *buf,int bufsize,int timeout) { // Timeout i
 
 }
 
-void Kangaroo::InitSocket() {
+bool Kangaroo::InitSocket() {
 
 #ifdef WIN64
   // connect to Winscok DLL
@@ -249,9 +249,12 @@ void Kangaroo::InitSocket() {
   int err = WSAStartup(MAKEWORD(2,2),&WSAData);
   if(err != 0) { 
     ::printf("WSAStartup failed error : %d\n",err);
-    exit(-1);
+    lastError = "WSAStartup failed";
+    return false;
   }
 #endif
+
+  return true;
 
 }
 
@@ -685,9 +688,10 @@ void Kangaroo::AcceptConnections(SOCKET server_soc) {
 }
 
 // Starts the server
-void Kangaroo::RunServer() {
+RunResult Kangaroo::RunServer() {
 
   g_stopRequested = 0;
+  SetRunResult(RESULT_NO_KEY);
 
   if(signal(SIGINT,sig_handler) == SIG_ERR)
     ::printf("\nWarning:can't install singal handler\n");
@@ -704,18 +708,21 @@ void Kangaroo::RunServer() {
 
   if(initDPSize<0) {
     ::printf("Error: Server must be launched with a specified number of distinguished bits (-d)\n");
-    exit(-1);
+    SetRunResult(RESULT_INVALID_INPUT);
+    return GetRunResult();
   }
   SetDP(initDPSize);
 
   if(sizeof(DP) != 40) {
     ::printf("Error: Invalid DP size struct\n");
-    exit(-1);
+    SetRunResult(RESULT_FATAL_ERROR);
+    return GetRunResult();
   }
 
   if(sizeof(DPHEADER) != 20) {
     ::printf("Error: Invalid DPHEADER size struct\n");
-    exit(-1);
+    SetRunResult(RESULT_FATAL_ERROR);
+    return GetRunResult();
   }
 
   if(saveKangaroo) {
@@ -729,14 +736,18 @@ void Kangaroo::RunServer() {
 
   // Server stuff
 
-  InitSocket();
+  if(!InitSocket()) {
+    SetRunResult(RESULT_RUNTIME_ERROR);
+    return GetRunResult();
+  }
 
   /* Create socket */
   serverSock = socket(AF_INET,SOCK_STREAM,0);
 
   if(serverSock<0) {
     ::printf("Error: Invalid socket : %s\n",GetNetworkError().c_str());
-    exit(-1);
+    SetRunResult(RESULT_RUNTIME_ERROR);
+    return GetRunResult();
   }
 
   struct sockaddr_in soc_addr;
@@ -754,12 +765,14 @@ void Kangaroo::RunServer() {
 
   if(bind(serverSock,(struct sockaddr*)&soc_addr,sizeof(soc_addr))) {
     ::printf("Error: Can not bind socket. Another server running?\n%s\n",GetNetworkError().c_str());
-    exit(-1);
+    SetRunResult(RESULT_RUNTIME_ERROR);
+    return GetRunResult();
   }
 
   if(listen(serverSock,MAX_CLIENT)<0) {
     ::printf("Error: Can not listen to socket\n%s\n",GetNetworkError().c_str());
-    exit(-1);
+    SetRunResult(RESULT_RUNTIME_ERROR);
+    return GetRunResult();
   }
 
   AcceptConnections(serverSock);
@@ -768,7 +781,10 @@ void Kangaroo::RunServer() {
   WSACleanup();
 #endif
 
-  return;
+  if(g_stopRequested && GetRunResult() == RESULT_NO_KEY)
+    SetRunResult(RESULT_SIGNAL_SAVE_OK);
+
+  return GetRunResult();
 
 }
 
@@ -789,7 +805,8 @@ bool Kangaroo::ConnectToServer(SOCKET *retSock) {
     if(signal(SIGTERM,sig_handler) == SIG_ERR)
       ::printf("\nWarning:can't install signal handler\n");
 
-    InitSocket();
+    if(!InitSocket())
+      return false;
 
     struct hostent *host_info;
     host_info = gethostbyname(serverIp.c_str());

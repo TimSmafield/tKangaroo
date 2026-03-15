@@ -38,6 +38,14 @@ static void solver_sig_handler(int signo) {
   }
 }
 
+RunResult Kangaroo::GetRunResult() const {
+  return runResult;
+}
+
+void Kangaroo::SetRunResult(RunResult result) {
+  runResult = result;
+}
+
 // ----------------------------------------------------------------------------
 
 Kangaroo::Kangaroo(Secp256K1 *secp,int32_t initDPSize,bool useGpu,string &workFile,string &iWorkFile,uint32_t savePeriod,bool saveKangaroo,bool saveKangarooByServer,
@@ -71,6 +79,7 @@ Kangaroo::Kangaroo(Secp256K1 *secp,int32_t initDPSize,bool useGpu,string &workFi
   this->keyIdx = 0;
   this->splitWorkfile = splitWorkfile;
   this->pid = Timer::getPID();
+  this->runResult = RESULT_FATAL_ERROR;
 
   CPU_GRP_SIZE = 1024;
 
@@ -242,7 +251,10 @@ bool  Kangaroo::CheckKey(Int d1,Int d2,uint8_t type) {
     pk.ModAddK1order(&rangeWidthDiv2);
 #endif
     pk.ModAddK1order(&rangeStart);    
-    return Output(&pk,'N',type);
+    bool solved = Output(&pk,'N',type);
+    if(solved)
+      SetRunResult(RESULT_KEY_FOUND);
+    return solved;
   }
 
   if(P.equals(keyToSearchNeg)) {
@@ -252,7 +264,10 @@ bool  Kangaroo::CheckKey(Int d1,Int d2,uint8_t type) {
     pk.ModAddK1order(&rangeWidthDiv2);
 #endif
     pk.ModAddK1order(&rangeStart);
-    return Output(&pk,'S',type);
+    bool solved = Output(&pk,'S',type);
+    if(solved)
+      SetRunResult(RESULT_KEY_FOUND);
+    return solved;
   }
 
   return false;
@@ -917,10 +932,11 @@ void Kangaroo::InitSearchKey() {
 
 // ----------------------------------------------------------------------------
 
-void Kangaroo::Run(int nbThread,std::vector<int> gpuId,std::vector<int> gridSize) {
+RunResult Kangaroo::Run(int nbThread,std::vector<int> gpuId,std::vector<int> gridSize) {
 
   double t0 = Timer::get_tick();
   g_stopRequested = 0;
+  SetRunResult(RESULT_NO_KEY);
 
   if(signal(SIGINT,solver_sig_handler) == SIG_ERR)
     ::printf("\nWarning: can't install SIGINT handler\n");
@@ -943,7 +959,8 @@ void Kangaroo::Run(int nbThread,std::vector<int> gpuId,std::vector<int> gridSize
   uint64_t totalThread = (uint64_t)nbCPUThread + (uint64_t)nbGPUThread;
   if(totalThread == 0) {
     ::printf("No CPU or GPU thread, exiting.\n");
-    ::exit(0);
+    SetRunResult(RESULT_RUNTIME_ERROR);
+    return GetRunResult();
   }
 
   TH_PARAM *params = (TH_PARAM *)malloc(totalThread * sizeof(TH_PARAM));
@@ -960,7 +977,8 @@ void Kangaroo::Run(int nbThread,std::vector<int> gpuId,std::vector<int> gridSize
     int x = gridSize[2ULL * i];
     int y = gridSize[2ULL * i + 1ULL];
     if(!GPUEngine::GetGridSize(gpuId[i],&x,&y)) {
-      return;
+      SetRunResult(RESULT_RUNTIME_ERROR);
+      return GetRunResult();
     } else {
       params[nbCPUThread + i].gridSizeX = x;
       params[nbCPUThread + i].gridSizeY = y;
@@ -976,8 +994,10 @@ void Kangaroo::Run(int nbThread,std::vector<int> gpuId,std::vector<int> gridSize
   // Set starting parameters
   if( clientMode ) {
     // Retrieve config from server
-    if( !GetConfigFromServer() )
-      ::exit(0);
+    if( !GetConfigFromServer() ) {
+      SetRunResult(RESULT_RUNTIME_ERROR);
+      return GetRunResult();
+    }
     // Client save only kangaroos, force -ws
     if(workFile.length()>0)
       saveKangaroo = true;
@@ -1018,7 +1038,10 @@ void Kangaroo::Run(int nbThread,std::vector<int> gpuId,std::vector<int> gridSize
   SetDP(initDPSize);
 
   // Fetch kangaroos (if any)
-  FectchKangaroos(params);
+  if(!FectchKangaroos(params)) {
+    SetRunResult(RESULT_RUNTIME_ERROR);
+    return GetRunResult();
+  }
 
 //#define STATS
 #ifdef STATS
@@ -1092,6 +1115,7 @@ void Kangaroo::Run(int nbThread,std::vector<int> gpuId,std::vector<int> gridSize
   double t1 = Timer::get_tick();
 
   ::printf("\nDone: Total time %s \n" , GetTimeStr(t1-t0+offsetTime).c_str());
+  return GetRunResult();
 
 }
 

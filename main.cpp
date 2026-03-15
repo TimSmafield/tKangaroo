@@ -26,7 +26,16 @@
 
 using namespace std;
 
-#define CHECKARG(opt,n) if(a>=argc-1) {::printf(opt " missing argument #%d\n",n);exit(0);} else {a++;}
+class MainError : public std::runtime_error {
+public:
+  MainError(RunResult result,const std::string& message)
+    : std::runtime_error(message), result(result) {
+  }
+
+  RunResult result;
+};
+
+#define CHECKARG(opt,n) if(a>=argc-1) {::printf(opt " missing argument #%d\n",n); throw MainError(RESULT_INVALID_INPUT, opt " missing argument");} else {a++;}
 
 // ------------------------------------------------------------------------------------------
 
@@ -79,7 +88,7 @@ int getInt(string name,char *v) {
   } catch(std::invalid_argument&) {
 
     printf("Invalid %s argument, number expected\n",name.c_str());
-    exit(-1);
+    throw MainError(RESULT_INVALID_INPUT,"Invalid integer argument");
 
   }
 
@@ -98,7 +107,7 @@ double getDouble(string name,char *v) {
   } catch(std::invalid_argument&) {
 
     printf("Invalid %s argument, number expected\n",name.c_str());
-    exit(-1);
+    throw MainError(RESULT_INVALID_INPUT,"Invalid floating-point argument");
 
   }
 
@@ -129,7 +138,7 @@ void getInts(string name,vector<int> &tokens,const string &text,char sep) {
   catch(std::invalid_argument &) {
 
     printf("Invalid %s argument, number expected\n",name.c_str());
-    exit(-1);
+    throw MainError(RESULT_INVALID_INPUT,"Invalid integer list argument");
 
   }
 
@@ -164,7 +173,33 @@ static string serverIP = "";
 static string outputFile = "";
 static bool splitWorkFile = false;
 
+static int RunResultToExitCode(RunResult result) {
+
+  switch(result) {
+    case RESULT_NO_KEY:
+      return 0;
+    case RESULT_KEY_FOUND:
+      return 10;
+    case RESULT_INVALID_INPUT:
+      return 20;
+    case RESULT_BAD_WORKFILE:
+      return 21;
+    case RESULT_RUNTIME_ERROR:
+      return 30;
+    case RESULT_SIGNAL_SAVE_OK:
+      return 40;
+    case RESULT_SIGNAL_SAVE_FAILED:
+      return 41;
+    case RESULT_FATAL_ERROR:
+    default:
+      return 50;
+  }
+
+}
+
 int main(int argc, char* argv[]) {
+
+  try {
 
 #ifdef USE_SYMMETRY
   printf("Kangaroo v" RELEASE " (with symmetry)\n");
@@ -303,7 +338,7 @@ int main(int argc, char* argv[]) {
       a++;
     } else {
       printf("Unexpected %s argument\n",argv[a]);
-      exit(-1);
+      throw MainError(RESULT_INVALID_INPUT,"Unexpected argument");
     }
 
   }
@@ -315,7 +350,7 @@ int main(int argc, char* argv[]) {
     }
   } else if(gridSize.size() != gpuId.size() * 2) {
     printf("Invalid gridSize or gpuId argument, must have coherent size\n");
-    exit(-1);
+    throw MainError(RESULT_INVALID_INPUT,"Invalid gridSize or gpuId argument");
   }
 
   Kangaroo *v = new Kangaroo(secp,dp,gpuEnable,workFile,iWorkFile,savePeriod,saveKangaroo,saveKangarooByServer,
@@ -338,22 +373,34 @@ int main(int argc, char* argv[]) {
       exit(0);
     } if(iWorkFile.length()>0) {
       if( !v->LoadWork(iWorkFile) )
-        exit(-1);
+        return RunResultToExitCode(RESULT_BAD_WORKFILE);
     } else if(configFile.length()>0) {
       if( !v->ParseConfigFile(configFile) )
-        exit(-1);
+        return RunResultToExitCode(RESULT_INVALID_INPUT);
     } else {
       if(serverIP.length()==0) {
         ::printf("No input file to process\n");
-        exit(-1);
+        throw MainError(RESULT_INVALID_INPUT,"No input file to process");
       }
     }
+    RunResult result;
     if(serverMode)
-      v->RunServer();
+      result = v->RunServer();
     else
-      v->Run(nbCPUThread,gpuId,gridSize);
+      result = v->Run(nbCPUThread,gpuId,gridSize);
+    return RunResultToExitCode(result);
   }
 
   return 0;
+
+  } catch(const MainError& e) {
+    return RunResultToExitCode(e.result);
+  } catch(const std::exception& e) {
+    fprintf(stderr,"Fatal error: %s\n",e.what());
+    return RunResultToExitCode(RESULT_FATAL_ERROR);
+  } catch(...) {
+    fprintf(stderr,"Fatal error: unexpected exception\n");
+    return RunResultToExitCode(RESULT_FATAL_ERROR);
+  }
 
 }
