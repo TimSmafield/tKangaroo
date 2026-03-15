@@ -782,7 +782,7 @@ RunResult Kangaroo::RunServer() {
 #endif
 
   if(g_stopRequested && GetRunResult() == RESULT_NO_KEY)
-    SetRunResult(RESULT_RUNTIME_ERROR);
+    SetRunResult(RESULT_SIGNAL_SAVE_OK);
 
   return GetRunResult();
 

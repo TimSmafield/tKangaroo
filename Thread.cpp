@@ -278,6 +278,8 @@ void Kangaroo::Process(TH_PARAM *params,std::string unit) {
   // Wait that all threads have started
   while(!hasStarted(params)) {
     if(g_stopRequested) {
+      if(GetRunResult() == RESULT_NO_KEY)
+        SetRunResult(RESULT_SIGNAL_SAVE_OK);
       endOfSearch = true;
       break;
     }
