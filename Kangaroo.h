@@ -215,7 +215,7 @@ private:
   int Read(SOCKET sock,char *buf,int bufsize,int timeout);
   bool GetConfigFromServer();
   bool ConnectToServer(SOCKET *retSock);
-  void InitSocket();
+  bool InitSocket();
   void WaitForServer();
   int32_t GetServerStatus();
   bool SendKangaroosToServer(std::string& fileName,std::vector<int128_t>& kangs);

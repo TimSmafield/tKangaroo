@@ -241,7 +241,7 @@ int Kangaroo::Read(SOCKET sock,char *buf,int bufsize,int timeout) { // Timeout i
 
 }
 
-void Kangaroo::InitSocket() {
+bool Kangaroo::InitSocket() {
 
 #ifdef WIN64
   // connect to Winscok DLL
@@ -249,9 +249,12 @@ void Kangaroo::InitSocket() {
   int err = WSAStartup(MAKEWORD(2,2),&WSAData);
   if(err != 0) { 
     ::printf("WSAStartup failed error : %d\n",err);
-    exit(-1);
+    lastError = "WSAStartup failed";
+    return false;
   }
 #endif
+
+  return true;
 
 }
 
@@ -733,7 +736,10 @@ RunResult Kangaroo::RunServer() {
 
   // Server stuff
 
-  InitSocket();
+  if(!InitSocket()) {
+    SetRunResult(RESULT_RUNTIME_ERROR);
+    return GetRunResult();
+  }
 
   /* Create socket */
   serverSock = socket(AF_INET,SOCK_STREAM,0);
@@ -799,7 +805,8 @@ bool Kangaroo::ConnectToServer(SOCKET *retSock) {
     if(signal(SIGTERM,sig_handler) == SIG_ERR)
       ::printf("\nWarning:can't install signal handler\n");
 
-    InitSocket();
+    if(!InitSocket())
+      return false;
 
     struct hostent *host_info;
     host_info = gethostbyname(serverIp.c_str());

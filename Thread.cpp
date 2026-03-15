@@ -365,6 +365,11 @@ void Kangaroo::Process(TH_PARAM *params,std::string unit) {
       if( (double)count > max ) {
         ::printf("\nKey#%2d [XX]Pub:  0x%s \n",keyIdx,secp->GetPublicKeyHex(true,keysToSearch[keyIdx]).c_str());
         ::printf("       Aborted !\n");
+        if(GetRunResult() != RESULT_KEY_FOUND &&
+           GetRunResult() != RESULT_SIGNAL_SAVE_OK &&
+           GetRunResult() != RESULT_SIGNAL_SAVE_FAILED) {
+          SetRunResult(RESULT_NO_KEY);
+        }
         endOfSearch = true;
         Timer::SleepMillis(1000);
       }
