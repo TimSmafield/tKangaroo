@@ -395,11 +395,13 @@ Kangaroo::Kangaroo(Secp256K1 *secp,int32_t initDPSize,bool useGpu,string &workFi
 
 bool Kangaroo::ParseConfigFile(std::string &fileName) {
 
-  configFilePath = fileName;
-
   // In client mode, config come from the server
-  if(clientMode)
+  if(clientMode) {
+    configFilePath = "";
     return true;
+  }
+
+  configFilePath = fileName;
 
   // Check file
   FILE *fp = fopen(fileName.c_str(),"rb");
@@ -709,6 +711,9 @@ bool Kangaroo::BestEffortCleanupOnFound() {
     targets.push_back(workFile);
   if(configFilePath.length() > 0)
     targets.push_back(configFilePath);
+
+  sort(targets.begin(),targets.end());
+  targets.erase(unique(targets.begin(),targets.end()),targets.end());
 
   for(size_t i = 0; i < targets.size(); i++) {
     string warning;
