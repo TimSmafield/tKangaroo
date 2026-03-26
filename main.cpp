@@ -19,7 +19,9 @@
 #include "Timer.h"
 #include "SECPK1/SECP256k1.h"
 #include "GPU/GPUEngine.h"
+#include <errno.h>
 #include <fstream>
+#include <sys/stat.h>
 #include <string>
 #include <string.h>
 #include <stdexcept>
@@ -52,6 +54,7 @@ void printUsage() {
   printf(" -t nbThread: Secify number of thread\n");
   printf(" -w workfile: Specify file to save work into (current processed key only)\n");
   printf(" -i workfile: Specify file to load work from (current processed key only)\n");
+  printf(" --resume-if-present <file> : Resume from workfile if it exists, otherwise start fresh\n");
   printf(" -wi workInterval: Periodic interval (in seconds) for saving work\n");
   printf(" -ws: Save kangaroos in the work file\n");
   printf(" -wss: Save kangaroos via the server\n");
@@ -158,6 +161,7 @@ static vector<int> gridSize;
 static string workFile = "";
 static string checkWorkFile = "";
 static string iWorkFile = "";
+static string resumeIfPresentFile = "";
 static uint32_t savePeriod = 60;
 static bool saveKangaroo = false;
 static bool saveKangarooByServer = false;
@@ -176,6 +180,37 @@ static string outputFile = "";
 static string publicKeyFile = "";
 static bool cleanupOnFound = false;
 static bool splitWorkFile = false;
+
+struct ResumeFileStatus {
+  bool exists;
+  bool nonEmpty;
+  long long size;
+};
+
+static ResumeFileStatus GetResumeFileStatus(const string& path) {
+
+#ifdef _WIN32
+  struct _stat64 st;
+  if(_stat64(path.c_str(),&st) != 0) {
+#else
+  struct stat st;
+  if(stat(path.c_str(),&st) != 0) {
+#endif
+    if(errno == ENOENT)
+      return { false,false,0 };
+    ::printf("[resume] Cannot access %s\n",path.c_str());
+    ::printf("%s\n",::strerror(errno));
+    throw MainError(RESULT_BAD_WORKFILE,"Cannot access resume workfile");
+  }
+
+  if((st.st_mode & S_IFMT) == S_IFDIR) {
+    ::printf("[resume] %s is a directory\n",path.c_str());
+    throw MainError(RESULT_BAD_WORKFILE,"Resume workfile path is a directory");
+  }
+
+  return { true,st.st_size > 0,(long long)st.st_size };
+
+}
 
 static int RunResultToExitCode(RunResult result) {
 
@@ -252,6 +287,10 @@ int main(int argc, char* argv[]) {
     } else if(strcmp(argv[a],"-i") == 0) {
       CHECKARG("-i",1);
       iWorkFile = string(argv[a]);
+      a++;
+    } else if(strcmp(argv[a],"--resume-if-present") == 0) {
+      CHECKARG("--resume-if-present",1);
+      resumeIfPresentFile = string(argv[a]);
       a++;
     } else if(strcmp(argv[a],"-wm") == 0) {
       CHECKARG("-wm",1);
@@ -354,6 +393,21 @@ int main(int argc, char* argv[]) {
       throw MainError(RESULT_INVALID_INPUT,"Unexpected argument");
     }
 
+  }
+
+  if(iWorkFile.length() > 0 && resumeIfPresentFile.length() > 0) {
+    ::printf("Cannot use -i and --resume-if-present together\n");
+    throw MainError(RESULT_INVALID_INPUT,"Conflicting workfile resume options");
+  }
+
+  if(resumeIfPresentFile.length() > 0) {
+    ResumeFileStatus resumeStatus = GetResumeFileStatus(resumeIfPresentFile);
+    if(resumeStatus.exists && resumeStatus.nonEmpty) {
+      ::printf("[resume] Resuming from %s (size=%lld)\n",resumeIfPresentFile.c_str(),resumeStatus.size);
+      iWorkFile = resumeIfPresentFile;
+    } else {
+      ::printf("[resume] No valid workfile found, starting fresh\n");
+    }
   }
 
   if(gridSize.size() == 0) {
