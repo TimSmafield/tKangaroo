@@ -557,6 +557,18 @@ bool Kangaroo::WritePlaintextResult(Int *pk,char sInfo,int sType) {
 }
 
 string Kangaroo::BuildEncryptedPayload(Int *pk,char sInfo,int sType) const {
+  Point matchedPoint = keysToSearch[keyIdx];
+  Point recoveredPoint = secp->ComputePublicKey(pk);
+  Int privateKeyCopy(*pk);
+  Int rangeStartCopy(rangeStart);
+  Int rangeEndCopy(rangeEnd);
+
+  string matchedPubHex = secp->GetPublicKeyHex(true,matchedPoint);
+  string recoveredPubHex = secp->GetPublicKeyHex(true,recoveredPoint);
+  string recoveredPrivHex = privateKeyCopy.GetBase16();
+  string rangeStartHex = rangeStartCopy.GetBase16();
+  string rangeEndHex = rangeEndCopy.GetBase16();
+
   ostringstream payload;
   payload << "{\n"
           << "  \"schema_version\": 1,\n"
@@ -566,11 +578,11 @@ string Kangaroo::BuildEncryptedPayload(Int *pk,char sInfo,int sType) const {
           << "  \"key_index\": " << keyIdx << ",\n"
           << "  \"match_type\": \"" << sInfo << "\",\n"
           << "  \"solution_type\": " << sType << ",\n"
-          << "  \"matched_public_key\": \"0x" << JsonEscape(secp->GetPublicKeyHex(true,keysToSearch[keyIdx])) << "\",\n"
-          << "  \"recovered_public_key\": \"0x" << JsonEscape(secp->GetPublicKeyHex(true,secp->ComputePublicKey(pk))) << "\",\n"
-          << "  \"recovered_private_key\": \"0x" << JsonEscape(pk->GetBase16()) << "\",\n"
-          << "  \"search_range_start\": \"0x" << JsonEscape(rangeStart.GetBase16()) << "\",\n"
-          << "  \"search_range_end\": \"0x" << JsonEscape(rangeEnd.GetBase16()) << "\"\n"
+          << "  \"matched_public_key\": \"0x" << JsonEscape(matchedPubHex) << "\",\n"
+          << "  \"recovered_public_key\": \"0x" << JsonEscape(recoveredPubHex) << "\",\n"
+          << "  \"recovered_private_key\": \"0x" << JsonEscape(recoveredPrivHex) << "\",\n"
+          << "  \"search_range_start\": \"0x" << JsonEscape(rangeStartHex) << "\",\n"
+          << "  \"search_range_end\": \"0x" << JsonEscape(rangeEndHex) << "\"\n"
           << "}\n";
   return payload.str();
 }
