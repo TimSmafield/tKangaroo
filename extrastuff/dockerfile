@@ -2,7 +2,7 @@
 FROM nvidia/cuda:12.4.1-devel-ubuntu22.04 AS build
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    git build-essential libgmp-dev ca-certificates \
+    git build-essential libgmp-dev libssl-dev ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 
 # Makefile expects legacy paths; provide shims
@@ -10,7 +10,8 @@ RUN ln -s /usr/local/cuda /usr/local/cuda-8.0 && \
     ln -s /usr/bin/g++ /usr/bin/g++-4.8
 
 WORKDIR /opt
-RUN git clone --depth=1 https://github.com/TimSmafield/tKangaroo.git Kangaroo
+ARG BRANCH=master
+RUN git clone --depth=1 --branch ${BRANCH} https://github.com/TimSmafield/tKangaroo.git Kangaroo
 WORKDIR /opt/Kangaroo
 
 # Build with GPU enabled (set CCAP for your GPU: 61=GTX1060, 75=Turing, 86=RTX30, 89=RTX40)
@@ -26,7 +27,7 @@ RUN make clean || true \
 FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libgomp1 libgmp10 ca-certificates \
+    libgomp1 libgmp10 libssl3 ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 
 ENV NVIDIA_VISIBLE_DEVICES=all

@@ -1,6 +1,39 @@
 docker system prune -a --volumes
 
-docker build --build-arg CCAP=61 -t kangaroo:gpu .
+docker build --no-cache  --build-arg CCAP=61 --build-arg BRANCH=statuscodes -t kangaroo:statuscodes1 .
 
 
 docker run --rm -it --gpus all -v C:\psi\docker\kangroo:/work kangaroo:gpu -gpu -t 8 -m 14 -o /work/run.out /work/test.conf
+
+kubectl create secret generic db-secret --from-literal=DB_Host='c3FsMDE=' --from-literal=DB_User='cm9vdA==' --from-literal=DB_Password='cGFzc3dvcmQxMjM='
+
+
+docker run --rm -it --gpus all -v C:\psi\docker\kangroo:/work kangaroo:gpu -ws -w /work/save.work -wi 900 -gpu -t 8 -m 5 -o /work/run.out /work/test.conf
+
+
+
+
+
+
+
+docker run --rm -it --gpus all -v C:\psi\docker\kangroo:/work kangaroo:v1 -ws -w /work/save.work -wi 60 -gpu -t 8 -m 5 -o /work/run.out /work/test.conf
+
+
+docker run --stop-timeout 900 --rm -it --gpus all -v C:\psi\docker\kangroo:/work  kangaroo:enc -o /work/run.out -i /work/save.work -ws -w /work/save.work -wi 2400 -gpu -t 8
+
+
+
+docker build --build-arg CCAP=61 BRANCH=encryption -t kangaroo:encryption .
+docker run --rm -it --gpus all -v C:\psi\docker\kangroo:/work kangaroo:netSave -ws -w /work/save2.work -wi 1200 -gpu -t 8 -m 5 -o /work/run.out /work/test.conf
+docker run --rm -it --gpus all -v C:\psi\docker\kangroo:/work kangaroo:netSave -o /work/run.out -i /work/save2.work -ws -w /work/save2.work -wi 1200 -gpu -t 8
+
+
+13 seconds standard save time
+
+
+docker build --no-cache --build-arg CCAP=61 --build-arg BRANCH=resumeif -t kangaroo:enc .
+
+docker run --rm --gpus all -v "C:\psi\docker\kangroo:/work" kangaroo:exit-test -gpu -t 8 -o /work/key_found.out -gpu /work/knownkey.conf; %LASTEXITCODE%
+
+
+docker run --rm --gpus all -v C:\psi\docker\kangroo:/work kangaroo:enc -gpu -wi 10000 -i /work/test.work -w /work/test.work -o /work/run.enc --pubkey /work/pub.pem --cleanup-on-found /work/test.conf

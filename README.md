@@ -32,6 +32,7 @@ Kangaroo [-v] [-t nbThread] [-d dpBit] [gpu] [-check]
  -t nbThread: Secify number of thread
  -w workfile: Specify file to save work into (current processed key only)
  -i workfile: Specify file to load work from (current processed key only)
+ --resume-if-present <file> : Resume from workfile if it exists, otherwise start fresh
  -wi workInterval: Periodic interval (in seconds) for saving work
  -ws: Save kangaroos in the work file
  -wss: Save kangaroos via the server
@@ -124,6 +125,8 @@ When you continue a work file on a different hardware, or using a different numb
 However, work files are compatible (same key and range) and can be merged, if 2 work files have a different number of distinguished bits, the lowest will be recorded in the destination file.\
 If you have several hosts with different configurations, it is preferable to use -ws on each host and then merge all files from time to time in order to check if the key can be solved. When a merge solve a key, no output file is written. A merged file does not contain kangaroos.
 
+For idempotent startup, `--resume-if-present <file>` behaves like `-i <file>` only when the file exists and is non-empty. If the file does not exist or is zero bytes, Kangaroo starts a fresh run and logs `[resume] No valid workfile found, starting fresh`. If the file exists and is non-empty, Kangaroo logs `[resume] Resuming from <file> (size=<bytes>)` and reuses the normal workfile load path. If the file exists but is invalid, unreadable, or is a directory, startup fails instead of silently falling back to a fresh run. `--resume-if-present` cannot be combined with `-i`.
+
 Start a work from scratch and save work file every 30 seconds:
 ```
 Kangaroo.exe -ws -w save.work -wi 30 in.txt
@@ -132,6 +135,11 @@ Kangaroo.exe -ws -w save.work -wi 30 in.txt
 Continue the work from save.work and save work file every 30 seconds:
 ```
 Kangaroo.exe -ws -w save.work -wi 30 -i save.work
+```
+
+Start fresh if the workfile is missing, otherwise resume from it:
+```
+Kangaroo.exe -ws -w save.work -wi 30 --resume-if-present save.work in.txt
 ```
 
 Getting info from a work file:
