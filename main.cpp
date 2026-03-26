@@ -69,6 +69,7 @@ void printUsage() {
   printf(" -nt timeout: Network timeout in millisec (default is 3000ms)\n");
   printf(" -o fileName: output result to fileName\n");
   printf(" --pubkey fileName: encrypt recovered result to fileName using an RSA public key\n");
+  printf(" --cleanup-on-found: best-effort scrub/delete workfile and config after encrypted success\n");
   printf(" -l: List cuda enabled devices\n");
   printf(" -check: Check GPU kernel vs CPU\n");
   printf(" inFile: intput configuration file\n");
@@ -173,6 +174,7 @@ static bool serverMode = false;
 static string serverIP = "";
 static string outputFile = "";
 static string publicKeyFile = "";
+static bool cleanupOnFound = false;
 static bool splitWorkFile = false;
 
 static int RunResultToExitCode(RunResult result) {
@@ -284,6 +286,9 @@ int main(int argc, char* argv[]) {
       CHECKARG("--pubkey",1);
       publicKeyFile = string(argv[a]);
       a++;
+    } else if(strcmp(argv[a],"--cleanup-on-found") == 0) {
+      cleanupOnFound = true;
+      a++;
     } else if(strcmp(argv[a],"-wi") == 0) {
       CHECKARG("-wi",1);
       savePeriod = getInt("savePeriod",argv[a]);
@@ -362,7 +367,7 @@ int main(int argc, char* argv[]) {
   }
 
   Kangaroo *v = new Kangaroo(secp,dp,gpuEnable,workFile,iWorkFile,savePeriod,saveKangaroo,saveKangarooByServer,
-                             maxStep,wtimeout,port,ntimeout,serverIP,outputFile,publicKeyFile,splitWorkFile);
+                             maxStep,wtimeout,port,ntimeout,serverIP,outputFile,publicKeyFile,cleanupOnFound,splitWorkFile);
   if(checkFlag) {
     v->Check(gpuId,gridSize);  
     exit(0);
