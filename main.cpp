@@ -182,10 +182,10 @@ static bool cleanupOnFound = false;
 static bool splitWorkFile = false;
 
 #ifdef _WIN32
-#define STAT_STRUCT _stat64
+#define STAT_STRUCT struct _stat64
 #define STAT_FUNC _stat64
 #else
-#define STAT_STRUCT stat
+#define STAT_STRUCT struct stat
 #define STAT_FUNC stat
 #endif
 
