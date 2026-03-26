@@ -181,14 +181,6 @@ static string publicKeyFile = "";
 static bool cleanupOnFound = false;
 static bool splitWorkFile = false;
 
-#ifdef _WIN32
-#define STAT_STRUCT struct _stat64
-#define STAT_FUNC _stat64
-#else
-#define STAT_STRUCT struct stat
-#define STAT_FUNC stat
-#endif
-
 struct ResumeFileStatus {
   bool exists;
   bool nonEmpty;
@@ -197,8 +189,13 @@ struct ResumeFileStatus {
 
 static ResumeFileStatus GetResumeFileStatus(const string& path) {
 
-  struct STAT_STRUCT st;
-  if(STAT_FUNC(path.c_str(),&st) != 0) {
+#ifdef _WIN32
+  struct _stat64 st;
+  if(_stat64(path.c_str(),&st) != 0) {
+#else
+  struct stat st;
+  if(stat(path.c_str(),&st) != 0) {
+#endif
     if(errno == ENOENT)
       return { false,false,0 };
     ::printf("[resume] Cannot access %s\n",path.c_str());
