@@ -19,18 +19,318 @@
 #include <fstream>
 #include "SECPK1/IntGroup.h"
 #include "Timer.h"
+#include <errno.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
 #include <string.h>
 #define _USE_MATH_DEFINES
 #include <math.h>
 #include <algorithm>
+#include <sstream>
+#include <vector>
 #ifndef WIN64
 #include <pthread.h>
+#include <sys/stat.h>
+#endif
+#ifdef WIN64
+#include <bcrypt.h>
+#include <wincrypt.h>
+#pragma comment(lib,"bcrypt.lib")
+#pragma comment(lib,"crypt32.lib")
 #endif
 
 using namespace std;
 
 #define safe_delete_array(x) if(x) {delete[] x;x=NULL;}
 volatile sig_atomic_t g_stopRequested = 0;
+
+namespace {
+
+string JsonEscape(const string& value) {
+  string escaped;
+  escaped.reserve(value.size());
+  for(size_t i = 0; i < value.size(); i++) {
+    unsigned char c = (unsigned char)value[i];
+    switch(c) {
+      case '\\':
+        escaped += "\\\\";
+        break;
+      case '"':
+        escaped += "\\\"";
+        break;
+      case '\b':
+        escaped += "\\b";
+        break;
+      case '\f':
+        escaped += "\\f";
+        break;
+      case '\n':
+        escaped += "\\n";
+        break;
+      case '\r':
+        escaped += "\\r";
+        break;
+      case '\t':
+        escaped += "\\t";
+        break;
+      default:
+        if(c < 0x20) {
+          char tmp[7];
+          sprintf(tmp,"\\u%04x",c);
+          escaped += tmp;
+        } else {
+          escaped.push_back((char)c);
+        }
+        break;
+    }
+  }
+  return escaped;
+}
+
+string Base64Encode(const unsigned char* data,size_t len) {
+  static const char alphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  if(len == 0)
+    return "";
+  string out;
+  out.reserve(((len + 2) / 3) * 4);
+  for(size_t i = 0; i < len; i += 3) {
+    unsigned int chunk = ((unsigned int)data[i]) << 16;
+    if(i + 1 < len)
+      chunk |= ((unsigned int)data[i + 1]) << 8;
+    if(i + 2 < len)
+      chunk |= (unsigned int)data[i + 2];
+    out.push_back(alphabet[(chunk >> 18) & 0x3F]);
+    out.push_back(alphabet[(chunk >> 12) & 0x3F]);
+    out.push_back((i + 1 < len) ? alphabet[(chunk >> 6) & 0x3F] : '=');
+    out.push_back((i + 2 < len) ? alphabet[chunk & 0x3F] : '=');
+  }
+  return out;
+}
+
+string GetDirectoryName(const string& path) {
+  size_t pos = path.find_last_of("/\\");
+  if(pos == string::npos)
+    return "";
+  if(pos == 0)
+    return path.substr(0,1);
+  return path.substr(0,pos);
+}
+
+string GetUtcTimestamp() {
+  time_t now = time(NULL);
+  struct tm utcTime;
+#ifdef WIN64
+  gmtime_s(&utcTime,&now);
+#else
+  gmtime_r(&now,&utcTime);
+#endif
+  char buffer[32];
+  strftime(buffer,sizeof(buffer),"%Y-%m-%dT%H:%M:%SZ",&utcTime);
+  return string(buffer);
+}
+
+#ifdef WIN64
+
+struct ScopedBCryptAlgHandle {
+  BCRYPT_ALG_HANDLE handle;
+  ScopedBCryptAlgHandle() : handle(NULL) {}
+  ~ScopedBCryptAlgHandle() {
+    if(handle != NULL)
+      BCryptCloseAlgorithmProvider(handle,0);
+  }
+};
+
+struct ScopedBCryptKeyHandle {
+  BCRYPT_KEY_HANDLE handle;
+  ScopedBCryptKeyHandle() : handle(NULL) {}
+  ~ScopedBCryptKeyHandle() {
+    if(handle != NULL)
+      BCryptDestroyKey(handle);
+  }
+};
+
+bool ReadFileBytes(const string& path,vector<unsigned char>& out) {
+  FILE* file = fopen(path.c_str(),"rb");
+  if(file == NULL)
+    return false;
+  if(fseek(file,0,SEEK_END) != 0) {
+    fclose(file);
+    return false;
+  }
+  long size = ftell(file);
+  if(size < 0) {
+    fclose(file);
+    return false;
+  }
+  rewind(file);
+  out.resize((size_t)size);
+  if(size > 0) {
+    size_t readCount = fread(&out[0],1,(size_t)size,file);
+    if(readCount != (size_t)size) {
+      fclose(file);
+      return false;
+    }
+  }
+  fclose(file);
+  return true;
+}
+
+bool LoadRecipientPublicKey(const string& publicKeyFile,BCRYPT_KEY_HANDLE* publicKey,string* errorMessage) {
+  vector<unsigned char> fileBytes;
+  if(!ReadFileBytes(publicKeyFile,fileBytes)) {
+    *errorMessage = "Cannot read public key file";
+    return false;
+  }
+
+  DWORD derSize = 0;
+  vector<unsigned char> derBytes;
+  const char* rawText = fileBytes.empty() ? "" : (const char*)&fileBytes[0];
+  DWORD rawSize = (DWORD)fileBytes.size();
+  if(CryptStringToBinaryA(rawText,rawSize,CRYPT_STRING_ANY,NULL,&derSize,NULL,NULL)) {
+    derBytes.resize(derSize);
+    if(!CryptStringToBinaryA(rawText,rawSize,CRYPT_STRING_ANY,&derBytes[0],&derSize,NULL,NULL)) {
+      *errorMessage = "Failed to decode PEM public key";
+      return false;
+    }
+    derBytes.resize(derSize);
+  } else {
+    derBytes = fileBytes;
+  }
+
+  CERT_PUBLIC_KEY_INFO* publicKeyInfo = NULL;
+  DWORD publicKeyInfoSize = 0;
+  if(!CryptDecodeObjectEx(X509_ASN_ENCODING,X509_PUBLIC_KEY_INFO,
+                          derBytes.empty() ? NULL : &derBytes[0],(DWORD)derBytes.size(),
+                          CRYPT_DECODE_ALLOC_FLAG,NULL,&publicKeyInfo,&publicKeyInfoSize)) {
+    *errorMessage = "Public key file is not a valid X.509 SubjectPublicKeyInfo";
+    return false;
+  }
+
+  bool ok = false;
+  if(publicKeyInfo->Algorithm.pszObjId != NULL &&
+     strcmp(publicKeyInfo->Algorithm.pszObjId,szOID_RSA_RSA) == 0) {
+    if(CryptImportPublicKeyInfoEx2(X509_ASN_ENCODING,publicKeyInfo,0,NULL,publicKey)) {
+      ok = true;
+    } else {
+      *errorMessage = "Failed to import RSA public key";
+    }
+  } else {
+    *errorMessage = "Only RSA public keys are supported for --pubkey";
+  }
+
+  LocalFree(publicKeyInfo);
+  return ok;
+}
+
+bool EncryptPayloadWithWindowsCng(const string& publicKeyFile,const string& payload,string& artifact,string& errorMessage) {
+  ScopedBCryptKeyHandle recipientKey;
+  if(!LoadRecipientPublicKey(publicKeyFile,&recipientKey.handle,&errorMessage))
+    return false;
+
+  vector<unsigned char> aesKey(32);
+  vector<unsigned char> nonce(12);
+  if(BCryptGenRandom(NULL,&aesKey[0],(ULONG)aesKey.size(),BCRYPT_USE_SYSTEM_PREFERRED_RNG) < 0 ||
+     BCryptGenRandom(NULL,&nonce[0],(ULONG)nonce.size(),BCRYPT_USE_SYSTEM_PREFERRED_RNG) < 0) {
+    errorMessage = "Failed to generate encryption randomness";
+    return false;
+  }
+
+  BCRYPT_OAEP_PADDING_INFO oaepInfo;
+  memset(&oaepInfo,0,sizeof(oaepInfo));
+  oaepInfo.pszAlgId = BCRYPT_SHA256_ALGORITHM;
+
+  ULONG wrappedKeySize = 0;
+  NTSTATUS status = BCryptEncrypt(recipientKey.handle,&aesKey[0],(ULONG)aesKey.size(),&oaepInfo,NULL,0,NULL,0,&wrappedKeySize,BCRYPT_PAD_OAEP);
+  if(status < 0) {
+    errorMessage = "Failed to size RSA-OAEP wrapped key";
+    return false;
+  }
+
+  vector<unsigned char> wrappedKey(wrappedKeySize);
+  status = BCryptEncrypt(recipientKey.handle,&aesKey[0],(ULONG)aesKey.size(),&oaepInfo,NULL,0,&wrappedKey[0],wrappedKeySize,&wrappedKeySize,BCRYPT_PAD_OAEP);
+  if(status < 0) {
+    errorMessage = "Failed to wrap AES key with RSA-OAEP";
+    return false;
+  }
+  wrappedKey.resize(wrappedKeySize);
+
+  ScopedBCryptAlgHandle aesAlg;
+  status = BCryptOpenAlgorithmProvider(&aesAlg.handle,BCRYPT_AES_ALGORITHM,NULL,0);
+  if(status < 0) {
+    errorMessage = "Failed to open AES provider";
+    return false;
+  }
+
+  status = BCryptSetProperty(aesAlg.handle,BCRYPT_CHAINING_MODE,(PUCHAR)BCRYPT_CHAIN_MODE_GCM,sizeof(BCRYPT_CHAIN_MODE_GCM),0);
+  if(status < 0) {
+    errorMessage = "Failed to configure AES-GCM";
+    return false;
+  }
+
+  DWORD objectSize = 0;
+  ULONG cbResult = 0;
+  status = BCryptGetProperty(aesAlg.handle,BCRYPT_OBJECT_LENGTH,(PUCHAR)&objectSize,sizeof(objectSize),&cbResult,0);
+  if(status < 0) {
+    errorMessage = "Failed to query AES key object size";
+    return false;
+  }
+
+  ScopedBCryptKeyHandle aesKeyHandle;
+  vector<unsigned char> keyObject(objectSize);
+  status = BCryptGenerateSymmetricKey(aesAlg.handle,&aesKeyHandle.handle,&keyObject[0],objectSize,&aesKey[0],(ULONG)aesKey.size(),0);
+  if(status < 0) {
+    errorMessage = "Failed to create AES-GCM key";
+    return false;
+  }
+
+  vector<unsigned char> tag(16);
+  BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO authInfo;
+  BCRYPT_INIT_AUTH_MODE_INFO(authInfo);
+  authInfo.pbNonce = &nonce[0];
+  authInfo.cbNonce = (ULONG)nonce.size();
+  authInfo.pbTag = &tag[0];
+  authInfo.cbTag = (ULONG)tag.size();
+
+  vector<unsigned char> plaintext(payload.begin(),payload.end());
+  ULONG cipherSize = 0;
+  status = BCryptEncrypt(aesKeyHandle.handle,
+                         plaintext.empty() ? NULL : &plaintext[0],(ULONG)plaintext.size(),
+                         &authInfo,NULL,0,NULL,0,&cipherSize,0);
+  if(status < 0) {
+    errorMessage = "Failed to size AES-GCM ciphertext";
+    return false;
+  }
+
+  vector<unsigned char> ciphertext(cipherSize);
+  status = BCryptEncrypt(aesKeyHandle.handle,
+                         plaintext.empty() ? NULL : &plaintext[0],(ULONG)plaintext.size(),
+                         &authInfo,NULL,0,
+                         ciphertext.empty() ? NULL : &ciphertext[0],cipherSize,&cipherSize,0);
+  if(status < 0) {
+    errorMessage = "Failed to encrypt payload with AES-GCM";
+    return false;
+  }
+  ciphertext.resize(cipherSize);
+
+  ostringstream out;
+  out << "{\n"
+      << "  \"schema_version\": 1,\n"
+      << "  \"artifact_type\": \"kangaroo-encrypted-result\",\n"
+      << "  \"key_encryption\": \"RSA-OAEP-SHA256\",\n"
+      << "  \"content_encryption\": \"AES-256-GCM\",\n"
+      << "  \"wrapped_key\": \"" << Base64Encode(&wrappedKey[0],wrappedKey.size()) << "\",\n"
+      << "  \"nonce\": \"" << Base64Encode(&nonce[0],nonce.size()) << "\",\n"
+      << "  \"tag\": \"" << Base64Encode(&tag[0],tag.size()) << "\",\n"
+      << "  \"ciphertext\": \"" << Base64Encode(ciphertext.empty() ? (const unsigned char*)"" : &ciphertext[0],ciphertext.size()) << "\"\n"
+      << "}\n";
+  artifact = out.str();
+  return true;
+}
+
+#endif
+
+}  // namespace
 
 static void solver_sig_handler(int signo) {
   if(signo == SIGINT || signo == SIGTERM) {
@@ -49,7 +349,7 @@ void Kangaroo::SetRunResult(RunResult result) {
 // ----------------------------------------------------------------------------
 
 Kangaroo::Kangaroo(Secp256K1 *secp,int32_t initDPSize,bool useGpu,string &workFile,string &iWorkFile,uint32_t savePeriod,bool saveKangaroo,bool saveKangarooByServer,
-                   double maxStep,int wtimeout,int port,int ntimeout,string serverIp,string outputFile,bool splitWorkfile) {
+                   double maxStep,int wtimeout,int port,int ntimeout,string serverIp,string outputFile,string publicKeyFile,bool splitWorkfile) {
 
   this->secp = secp;
   this->initDPSize = initDPSize;
@@ -70,6 +370,7 @@ Kangaroo::Kangaroo(Secp256K1 *secp,int32_t initDPSize,bool useGpu,string &workFi
   this->ntimeout = ntimeout;
   this->serverIp = serverIp;
   this->outputFile = outputFile;
+  this->publicKeyFile = publicKeyFile;
   this->hostInfo = NULL;
   this->endOfSearch = false;
   this->saveRequest = false;
@@ -159,6 +460,66 @@ bool Kangaroo::ParseConfigFile(std::string &fileName) {
 
 }
 
+bool Kangaroo::ValidateEncryptedOutputConfiguration() {
+  if(publicKeyFile.length() == 0)
+    return true;
+
+#ifndef WIN64
+  printf("Error: --pubkey is only supported in WIN64 builds\n");
+  SetRunResult(RESULT_OUTPUT_ERROR);
+  return false;
+#else
+  if(outputFile.length() == 0) {
+    printf("Error: --pubkey requires -o <path> for the encrypted artifact\n");
+    SetRunResult(RESULT_OUTPUT_ERROR);
+    return false;
+  }
+
+  FILE* publicKey = fopen(publicKeyFile.c_str(),"rb");
+  if(publicKey == NULL) {
+    printf("Error: Cannot open public key file %s: %s\n",publicKeyFile.c_str(),strerror(errno));
+    SetRunResult(RESULT_OUTPUT_ERROR);
+    return false;
+  }
+  fclose(publicKey);
+
+  string outputDir = GetDirectoryName(outputFile);
+  if(outputDir.length() > 0) {
+    DWORD attr = GetFileAttributesA(outputDir.c_str());
+    if(attr == INVALID_FILE_ATTRIBUTES || (attr & FILE_ATTRIBUTE_DIRECTORY) == 0) {
+      printf("Error: Output directory %s does not exist\n",outputDir.c_str());
+      SetRunResult(RESULT_OUTPUT_ERROR);
+      return false;
+    }
+  }
+
+  DWORD outputAttr = GetFileAttributesA(outputFile.c_str());
+  if(outputAttr != INVALID_FILE_ATTRIBUTES && (outputAttr & FILE_ATTRIBUTE_DIRECTORY) == 0) {
+    FILE* existingOutput = fopen(outputFile.c_str(),"ab");
+    if(existingOutput == NULL) {
+      printf("Error: Output path %s is not writable\n",outputFile.c_str());
+      SetRunResult(RESULT_OUTPUT_ERROR);
+      return false;
+    }
+    fclose(existingOutput);
+  }
+
+  ScopedBCryptKeyHandle publicKeyHandle;
+  string errorMessage;
+  if(!LoadRecipientPublicKey(publicKeyFile,&publicKeyHandle.handle,&errorMessage)) {
+    printf("Error: %s\n",errorMessage.c_str());
+    SetRunResult(RESULT_OUTPUT_ERROR);
+    return false;
+  }
+
+  return true;
+#endif
+}
+
+bool Kangaroo::ValidateOutputConfiguration() {
+  return ValidateEncryptedOutputConfiguration();
+}
+
 // ----------------------------------------------------------------------------
 
 bool Kangaroo::IsDP(uint64_t x) {
@@ -189,8 +550,7 @@ void Kangaroo::SetDP(int size) {
 
 // ----------------------------------------------------------------------------
 
-bool Kangaroo::Output(Int *pk,char sInfo,int sType) {
-
+bool Kangaroo::WritePlaintextResult(Int *pk,char sInfo,int sType) {
 
   FILE* f = stdout;
   bool needToClose = false;
@@ -221,10 +581,82 @@ bool Kangaroo::Output(Int *pk,char sInfo,int sType) {
     return false;
   }
 
-
   if(needToClose)
     fclose(f);
 
+  return true;
+
+}
+
+string Kangaroo::BuildEncryptedPayload(Int *pk,char sInfo,int sType) const {
+  ostringstream payload;
+  payload << "{\n"
+          << "  \"schema_version\": 1,\n"
+          << "  \"artifact_type\": \"kangaroo-recovered-result\",\n"
+          << "  \"curve_name\": \"secp256k1\",\n"
+          << "  \"timestamp_utc\": \"" << JsonEscape(GetUtcTimestamp()) << "\",\n"
+          << "  \"key_index\": " << keyIdx << ",\n"
+          << "  \"match_type\": \"" << sInfo << "\",\n"
+          << "  \"solution_type\": " << sType << ",\n"
+          << "  \"matched_public_key\": \"0x" << JsonEscape(secp->GetPublicKeyHex(true,keysToSearch[keyIdx])) << "\",\n"
+          << "  \"recovered_public_key\": \"0x" << JsonEscape(secp->GetPublicKeyHex(true,secp->ComputePublicKey(pk))) << "\",\n"
+          << "  \"recovered_private_key\": \"0x" << JsonEscape(pk->GetBase16()) << "\",\n"
+          << "  \"search_range_start\": \"0x" << JsonEscape(rangeStart.GetBase16()) << "\",\n"
+          << "  \"search_range_end\": \"0x" << JsonEscape(rangeEnd.GetBase16()) << "\"\n"
+          << "}\n";
+  return payload.str();
+}
+
+bool Kangaroo::WriteEncryptedResult(Int *pk,char sInfo,int sType) {
+  string artifact;
+  string errorMessage;
+  string payload = BuildEncryptedPayload(pk,sInfo,sType);
+
+#ifdef WIN64
+  if(!EncryptPayloadWithWindowsCng(publicKeyFile,payload,artifact,errorMessage)) {
+    printf("\nEncrypted output failed: %s\n",errorMessage.c_str());
+    return false;
+  }
+#else
+  (void)pk;
+  (void)sInfo;
+  (void)sType;
+  errorMessage = "--pubkey is only supported in WIN64 builds";
+  printf("\nEncrypted output failed: %s\n",errorMessage.c_str());
+  return false;
+#endif
+
+  FILE* out = fopen(outputFile.c_str(),"wb");
+  if(out == NULL) {
+    printf("\nCannot open %s for writing encrypted result: %s\n",outputFile.c_str(),strerror(errno));
+    return false;
+  }
+
+  size_t written = fwrite(artifact.data(),1,artifact.size(),out);
+  bool closeOk = fclose(out) == 0;
+  if(written != artifact.size() || !closeOk) {
+    printf("\nFailed to write encrypted result to %s\n",outputFile.c_str());
+    return false;
+  }
+
+  printf("\nKey#%2d [%d%c] encrypted result written to %s\n",keyIdx,sType,sInfo,outputFile.c_str());
+  return true;
+}
+
+bool Kangaroo::Output(Int *pk,char sInfo,int sType) {
+
+  Point PR = secp->ComputePublicKey(pk);
+  if(!PR.equals(keysToSearch[keyIdx])) {
+    if(publicKeyFile.length() == 0) {
+      ::printf("\n");
+      ::printf("Key#%2d [%d%c]Pub:  0x%s \n",keyIdx,sType,sInfo,secp->GetPublicKeyHex(true,keysToSearch[keyIdx]).c_str());
+      ::printf("       Failed !\n");
+    }
+    return false;
+  }
+
+  bool ok = publicKeyFile.length() > 0 ? WriteEncryptedResult(pk,sInfo,sType) : WritePlaintextResult(pk,sInfo,sType);
+  SetRunResult(ok ? RESULT_KEY_FOUND : RESULT_OUTPUT_ERROR);
   return true;
 
 }
@@ -251,10 +683,7 @@ bool  Kangaroo::CheckKey(Int d1,Int d2,uint8_t type) {
     pk.ModAddK1order(&rangeWidthDiv2);
 #endif
     pk.ModAddK1order(&rangeStart);    
-    bool solved = Output(&pk,'N',type);
-    if(solved)
-      SetRunResult(RESULT_KEY_FOUND);
-    return solved;
+    return Output(&pk,'N',type);
   }
 
   if(P.equals(keyToSearchNeg)) {
@@ -264,10 +693,7 @@ bool  Kangaroo::CheckKey(Int d1,Int d2,uint8_t type) {
     pk.ModAddK1order(&rangeWidthDiv2);
 #endif
     pk.ModAddK1order(&rangeStart);
-    bool solved = Output(&pk,'S',type);
-    if(solved)
-      SetRunResult(RESULT_KEY_FOUND);
-    return solved;
+    return Output(&pk,'S',type);
   }
 
   return false;
@@ -316,6 +742,9 @@ bool Kangaroo::CollisionCheck(Int* d1,uint32_t type1,Int* d2,uint32_t type2) {
       return false;
 
     }
+
+    if(GetRunResult() == RESULT_OUTPUT_ERROR)
+      return true;
 
   }
 

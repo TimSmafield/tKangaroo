@@ -48,6 +48,7 @@ Kangaroo [-v] [-t nbThread] [-d dpBit] [gpu] [-check]
  -sp port: Server port, default is 17403
  -nt timeout: Network timeout in millisec (default is 3000ms)
  -o fileName: output result to fileName
+ --pubkey fileName: encrypt recovered result to fileName using an RSA public key
  -l: List cuda enabled devices
  -check: Check GPU kernel vs CPU
  inFile: intput configuration file
