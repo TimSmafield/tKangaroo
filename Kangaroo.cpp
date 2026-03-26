@@ -29,6 +29,9 @@
 #include <algorithm>
 #include <sstream>
 #include <vector>
+#ifdef WIN64
+#include <io.h>
+#endif
 #ifndef WIN64
 #include <pthread.h>
 #endif
@@ -339,7 +342,7 @@ void Kangaroo::SetRunResult(RunResult result) {
 // ----------------------------------------------------------------------------
 
 Kangaroo::Kangaroo(Secp256K1 *secp,int32_t initDPSize,bool useGpu,string &workFile,string &iWorkFile,uint32_t savePeriod,bool saveKangaroo,bool saveKangarooByServer,
-                   double maxStep,int wtimeout,int port,int ntimeout,string serverIp,string outputFile,string publicKeyFile,bool splitWorkfile) {
+                   double maxStep,int wtimeout,int port,int ntimeout,string serverIp,string outputFile,string publicKeyFile,bool cleanupOnFound,bool splitWorkfile) {
 
   this->secp = secp;
   this->initDPSize = initDPSize;
@@ -361,6 +364,7 @@ Kangaroo::Kangaroo(Secp256K1 *secp,int32_t initDPSize,bool useGpu,string &workFi
   this->serverIp = serverIp;
   this->outputFile = outputFile;
   this->publicKeyFile = publicKeyFile;
+  this->configFilePath = "";
   this->hostInfo = NULL;
   this->endOfSearch = false;
   this->saveRequest = false;
@@ -369,6 +373,7 @@ Kangaroo::Kangaroo(Secp256K1 *secp,int32_t initDPSize,bool useGpu,string &workFi
   this->collisionInSameHerd = 0;
   this->keyIdx = 0;
   this->splitWorkfile = splitWorkfile;
+  this->cleanupOnFound = cleanupOnFound;
   this->pid = Timer::getPID();
   this->runResult = RESULT_FATAL_ERROR;
 
@@ -391,8 +396,12 @@ Kangaroo::Kangaroo(Secp256K1 *secp,int32_t initDPSize,bool useGpu,string &workFi
 bool Kangaroo::ParseConfigFile(std::string &fileName) {
 
   // In client mode, config come from the server
-  if(clientMode)
+  if(clientMode) {
+    configFilePath = "";
     return true;
+  }
+
+  configFilePath = fileName;
 
   // Check file
   FILE *fp = fopen(fileName.c_str(),"rb");
@@ -610,8 +619,111 @@ bool Kangaroo::WriteEncryptedResult(Int *pk,char sInfo,int sType) {
     return false;
   }
 
+  if(cleanupOnFound) {
+    BestEffortCleanupOnFound();
+  }
+
   printf("\nKey#%2d [%d%c] encrypted result written to %s\n",keyIdx,sType,sInfo,outputFile.c_str());
   return true;
+}
+
+bool Kangaroo::BestEffortScrubAndDeleteFile(const std::string& path,std::string* warning) {
+  if(path.length() == 0)
+    return true;
+
+  FILE* file = fopen(path.c_str(),"rb+");
+  bool scrubOk = true;
+  bool missing = false;
+
+  if(file != NULL) {
+    if(fseek(file,0,SEEK_END) != 0) {
+      scrubOk = false;
+      *warning = "failed to seek for overwrite";
+    } else {
+      long size = ftell(file);
+      if(size < 0) {
+        scrubOk = false;
+        *warning = "failed to determine file size for overwrite";
+      } else if(fseek(file,0,SEEK_SET) != 0) {
+        scrubOk = false;
+        *warning = "failed to rewind for overwrite";
+      } else {
+        vector<unsigned char> zeros(4096,0);
+        long remaining = size;
+        while(remaining > 0) {
+          size_t chunk = remaining > (long)zeros.size() ? zeros.size() : (size_t)remaining;
+          if(fwrite(&zeros[0],1,chunk,file) != chunk) {
+            scrubOk = false;
+            *warning = "failed during overwrite pass";
+            break;
+          }
+          remaining -= (long)chunk;
+        }
+        if(scrubOk) {
+          if(fflush(file) != 0) {
+            scrubOk = false;
+            *warning = "failed to flush overwrite pass";
+          } else {
+#ifdef WIN64
+            if(_commit(_fileno(file)) != 0) {
+#else
+            if(fsync(fileno(file)) != 0) {
+#endif
+              scrubOk = false;
+              *warning = "failed to sync overwrite pass";
+            }
+          }
+        }
+      }
+    }
+    if(fclose(file) != 0 && scrubOk) {
+      scrubOk = false;
+      *warning = "failed to close overwritten file";
+    }
+  } else if(errno == ENOENT) {
+    missing = true;
+  } else {
+    scrubOk = false;
+    *warning = string("failed to open for overwrite: ") + strerror(errno);
+  }
+
+  if(remove(path.c_str()) != 0) {
+    if(errno != ENOENT) {
+      if(scrubOk && !missing)
+        *warning = string("failed to delete file: ") + strerror(errno);
+      else if(warning->length() == 0)
+        *warning = string("failed to delete file: ") + strerror(errno);
+      return false;
+    }
+  }
+
+  if(missing)
+    return true;
+
+  return scrubOk;
+}
+
+bool Kangaroo::BestEffortCleanupOnFound() {
+  bool ok = true;
+  vector<string> targets;
+
+  if(workFile.length() > 0)
+    targets.push_back(workFile);
+  if(configFilePath.length() > 0)
+    targets.push_back(configFilePath);
+
+  sort(targets.begin(),targets.end());
+  targets.erase(unique(targets.begin(),targets.end()),targets.end());
+
+  for(size_t i = 0; i < targets.size(); i++) {
+    string warning;
+    if(!BestEffortScrubAndDeleteFile(targets[i],&warning)) {
+      ok = false;
+      printf("Cleanup warning: %s (%s)\n",targets[i].c_str(),warning.c_str());
+    }
+  }
+
+  return ok;
 }
 
 bool Kangaroo::Output(Int *pk,char sInfo,int sType) {

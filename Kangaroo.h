@@ -144,7 +144,7 @@ public:
 
   Kangaroo(Secp256K1 *secp,int32_t initDPSize,bool useGpu,std::string &workFile,std::string &iWorkFile,
            uint32_t savePeriod,bool saveKangaroo,bool saveKangarooByServer,double maxStep,int wtimeout,int sport,int ntimeout,
-           std::string serverIp,std::string outputFile,std::string publicKeyFile,bool splitWorkfile);
+           std::string serverIp,std::string outputFile,std::string publicKeyFile,bool cleanupOnFound,bool splitWorkfile);
   RunResult Run(int nbThread,std::vector<int> gpuId,std::vector<int> gridSize);
   RunResult RunServer();
   bool ParseConfigFile(std::string &fileName);
@@ -195,6 +195,8 @@ private:
   bool WriteEncryptedResult(Int* pk,char sInfo,int sType);
   std::string BuildEncryptedPayload(Int* pk,char sInfo,int sType) const;
   bool ValidateEncryptedOutputConfiguration();
+  bool BestEffortCleanupOnFound();
+  bool BestEffortScrubAndDeleteFile(const std::string& path,std::string* warning);
 
   // Backup stuff
   bool SaveWork(std::string fileName,FILE *f,int type,uint64_t totalCount,double totalTime);
@@ -288,6 +290,7 @@ private:
   // Backup stuff
   std::string outputFile;
   std::string publicKeyFile;
+  std::string configFilePath;
   FILE *fRead;
   uint64_t offsetCount;
   double offsetTime;
@@ -298,6 +301,7 @@ private:
   bool saveRequest;
   bool saveKangaroo;
   bool saveKangarooByServer;
+  bool cleanupOnFound;
   int wtimeout;
   int ntimeout;
   bool splitWorkfile;

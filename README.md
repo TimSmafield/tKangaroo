@@ -49,6 +49,7 @@ Kangaroo [-v] [-t nbThread] [-d dpBit] [gpu] [-check]
  -nt timeout: Network timeout in millisec (default is 3000ms)
  -o fileName: output result to fileName
  --pubkey fileName: encrypt recovered result to fileName using an RSA public key
+ --cleanup-on-found: best-effort scrub/delete workfile and config after encrypted success
  -l: List cuda enabled devices
  -check: Check GPU kernel vs CPU
  inFile: intput configuration file
@@ -56,11 +57,14 @@ Kangaroo [-v] [-t nbThread] [-d dpBit] [gpu] [-check]
 
 Encrypted result mode uses hybrid encryption with OpenSSL: the recovered-result JSON payload is encrypted with AES-256-GCM, and that AES key is encrypted with the recipient RSA public key using RSA-OAEP-SHA256. When `--pubkey` is set, Kangaroo writes only the encrypted artifact to `-o` and does not write the plaintext private key to disk.
 
+If `--cleanup-on-found` is also set, Kangaroo will make a single best-effort overwrite-and-delete pass against the configured workfile and parsed config file, but only after the encrypted artifact has been written and closed successfully. Cleanup warnings do not downgrade a successful encrypted result, and this is not guaranteed secure erasure on SSDs, overlay filesystems, bind mounts, or copy-on-write storage.
+
 Example:
 
 ```bash
 ./kangaroo -o run.out in.txt
 ./kangaroo -o run.enc --pubkey recipient_pub.pem in.txt
+./kangaroo -w state.work -o run.enc --pubkey recipient_pub.pem --cleanup-on-found in.txt
 ```
 
 Decryption outline:
