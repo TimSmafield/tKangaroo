@@ -68,6 +68,7 @@ void printUsage() {
   printf(" -sp port: Server port, default is 17403\n");
   printf(" -nt timeout: Network timeout in millisec (default is 3000ms)\n");
   printf(" -o fileName: output result to fileName\n");
+  printf(" --pubkey fileName: encrypt recovered result to fileName using an RSA public key\n");
   printf(" -l: List cuda enabled devices\n");
   printf(" -check: Check GPU kernel vs CPU\n");
   printf(" inFile: intput configuration file\n");
@@ -171,6 +172,7 @@ static int port = 17403;
 static bool serverMode = false;
 static string serverIP = "";
 static string outputFile = "";
+static string publicKeyFile = "";
 static bool splitWorkFile = false;
 
 static int RunResultToExitCode(RunResult result) {
@@ -186,6 +188,8 @@ static int RunResultToExitCode(RunResult result) {
       return 21;
     case RESULT_RUNTIME_ERROR:
       return 30;
+    case RESULT_OUTPUT_ERROR:
+      return 31;
     case RESULT_SIGNAL_SAVE_OK:
       return 40;
     case RESULT_SIGNAL_SAVE_FAILED:
@@ -276,6 +280,10 @@ int main(int argc, char* argv[]) {
       CHECKARG("-o",1);
       outputFile = string(argv[a]);
       a++;
+    } else if(strcmp(argv[a],"--pubkey") == 0) {
+      CHECKARG("--pubkey",1);
+      publicKeyFile = string(argv[a]);
+      a++;
     } else if(strcmp(argv[a],"-wi") == 0) {
       CHECKARG("-wi",1);
       savePeriod = getInt("savePeriod",argv[a]);
@@ -354,7 +362,7 @@ int main(int argc, char* argv[]) {
   }
 
   Kangaroo *v = new Kangaroo(secp,dp,gpuEnable,workFile,iWorkFile,savePeriod,saveKangaroo,saveKangarooByServer,
-                             maxStep,wtimeout,port,ntimeout,serverIP,outputFile,splitWorkFile);
+                             maxStep,wtimeout,port,ntimeout,serverIP,outputFile,publicKeyFile,splitWorkFile);
   if(checkFlag) {
     v->Check(gpuId,gridSize);  
     exit(0);
@@ -383,6 +391,8 @@ int main(int argc, char* argv[]) {
         throw MainError(RESULT_INVALID_INPUT,"No input file to process");
       }
     }
+    if(!v->ValidateOutputConfiguration())
+      return RunResultToExitCode(v->GetRunResult());
     RunResult result;
     if(serverMode)
       result = v->RunServer();

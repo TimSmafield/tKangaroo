@@ -63,6 +63,7 @@ enum RunResult {
   RESULT_INVALID_INPUT,
   RESULT_BAD_WORKFILE,
   RESULT_RUNTIME_ERROR,
+  RESULT_OUTPUT_ERROR,
   RESULT_SIGNAL_SAVE_OK,
   RESULT_SIGNAL_SAVE_FAILED,
   RESULT_FATAL_ERROR
@@ -143,7 +144,7 @@ public:
 
   Kangaroo(Secp256K1 *secp,int32_t initDPSize,bool useGpu,std::string &workFile,std::string &iWorkFile,
            uint32_t savePeriod,bool saveKangaroo,bool saveKangarooByServer,double maxStep,int wtimeout,int sport,int ntimeout,
-           std::string serverIp,std::string outputFile,bool splitWorkfile);
+           std::string serverIp,std::string outputFile,std::string publicKeyFile,bool splitWorkfile);
   RunResult Run(int nbThread,std::vector<int> gpuId,std::vector<int> gridSize);
   RunResult RunServer();
   bool ParseConfigFile(std::string &fileName);
@@ -172,6 +173,7 @@ public:
   void RemoveConnectedClient();
   void RemoveConnectedKangaroo(uint64_t nb);
   RunResult GetRunResult() const;
+  bool ValidateOutputConfiguration();
 
 private:
 
@@ -189,6 +191,10 @@ private:
   void InitSearchKey();
   std::string GetTimeStr(double s);
   bool Output(Int* pk,char sInfo,int sType);
+  bool WritePlaintextResult(Int* pk,char sInfo,int sType);
+  bool WriteEncryptedResult(Int* pk,char sInfo,int sType);
+  std::string BuildEncryptedPayload(Int* pk,char sInfo,int sType) const;
+  bool ValidateEncryptedOutputConfiguration();
 
   // Backup stuff
   bool SaveWork(std::string fileName,FILE *f,int type,uint64_t totalCount,double totalTime);
@@ -281,6 +287,7 @@ private:
 
   // Backup stuff
   std::string outputFile;
+  std::string publicKeyFile;
   FILE *fRead;
   uint64_t offsetCount;
   double offsetTime;

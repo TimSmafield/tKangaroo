@@ -19,18 +19,308 @@
 #include <fstream>
 #include "SECPK1/IntGroup.h"
 #include "Timer.h"
+#include <errno.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
 #include <string.h>
 #define _USE_MATH_DEFINES
 #include <math.h>
 #include <algorithm>
+#include <sstream>
+#include <vector>
 #ifndef WIN64
 #include <pthread.h>
 #endif
+#include <openssl/err.h>
+#include <openssl/evp.h>
+#include <openssl/pem.h>
+#include <openssl/rand.h>
+#include <openssl/rsa.h>
 
 using namespace std;
 
 #define safe_delete_array(x) if(x) {delete[] x;x=NULL;}
 volatile sig_atomic_t g_stopRequested = 0;
+
+namespace {
+
+struct ScopedFile {
+  FILE* handle;
+  ScopedFile(FILE* file = NULL) : handle(file) {}
+  ~ScopedFile() {
+    if(handle != NULL)
+      fclose(handle);
+  }
+};
+
+struct ScopedEvpCipherCtx {
+  EVP_CIPHER_CTX* handle;
+  ScopedEvpCipherCtx() : handle(EVP_CIPHER_CTX_new()) {}
+  ~ScopedEvpCipherCtx() {
+    if(handle != NULL)
+      EVP_CIPHER_CTX_free(handle);
+  }
+};
+
+struct ScopedEvpPkeyCtx {
+  EVP_PKEY_CTX* handle;
+  explicit ScopedEvpPkeyCtx(EVP_PKEY* pkey) : handle(EVP_PKEY_CTX_new(pkey,NULL)) {}
+  ~ScopedEvpPkeyCtx() {
+    if(handle != NULL)
+      EVP_PKEY_CTX_free(handle);
+  }
+};
+
+struct ScopedEvpPkey {
+  EVP_PKEY* handle;
+  ScopedEvpPkey() : handle(NULL) {}
+  ~ScopedEvpPkey() {
+    if(handle != NULL)
+      EVP_PKEY_free(handle);
+  }
+};
+
+struct ScopedRsa {
+  RSA* handle;
+  ScopedRsa() : handle(NULL) {}
+  ~ScopedRsa() {
+    if(handle != NULL)
+      RSA_free(handle);
+  }
+};
+
+string JsonEscape(const string& value) {
+  string escaped;
+  escaped.reserve(value.size());
+  for(size_t i = 0; i < value.size(); i++) {
+    unsigned char c = (unsigned char)value[i];
+    switch(c) {
+      case '\\':
+        escaped += "\\\\";
+        break;
+      case '"':
+        escaped += "\\\"";
+        break;
+      case '\b':
+        escaped += "\\b";
+        break;
+      case '\f':
+        escaped += "\\f";
+        break;
+      case '\n':
+        escaped += "\\n";
+        break;
+      case '\r':
+        escaped += "\\r";
+        break;
+      case '\t':
+        escaped += "\\t";
+        break;
+      default:
+        if(c < 0x20) {
+          char tmp[7];
+          sprintf(tmp,"\\u%04x",c);
+          escaped += tmp;
+        } else {
+          escaped.push_back((char)c);
+        }
+        break;
+    }
+  }
+  return escaped;
+}
+
+string Base64Encode(const unsigned char* data,size_t len) {
+  static const char alphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  if(len == 0)
+    return "";
+  string out;
+  out.reserve(((len + 2) / 3) * 4);
+  for(size_t i = 0; i < len; i += 3) {
+    unsigned int chunk = ((unsigned int)data[i]) << 16;
+    if(i + 1 < len)
+      chunk |= ((unsigned int)data[i + 1]) << 8;
+    if(i + 2 < len)
+      chunk |= (unsigned int)data[i + 2];
+    out.push_back(alphabet[(chunk >> 18) & 0x3F]);
+    out.push_back(alphabet[(chunk >> 12) & 0x3F]);
+    out.push_back((i + 1 < len) ? alphabet[(chunk >> 6) & 0x3F] : '=');
+    out.push_back((i + 2 < len) ? alphabet[chunk & 0x3F] : '=');
+  }
+  return out;
+}
+
+string GetDirectoryName(const string& path) {
+  size_t pos = path.find_last_of("/\\");
+  if(pos == string::npos)
+    return "";
+  if(pos == 0)
+    return path.substr(0,1);
+  return path.substr(0,pos);
+}
+
+string JoinPath(const string& dir,const string& fileName) {
+  if(dir.length() == 0 || dir == ".")
+    return fileName;
+  char last = dir[dir.length() - 1];
+  if(last == '/' || last == '\\')
+    return dir + fileName;
+  return dir + "/" + fileName;
+}
+
+string GetUtcTimestamp() {
+  time_t now = time(NULL);
+  struct tm utcTime;
+#ifdef WIN64
+  gmtime_s(&utcTime,&now);
+#else
+  gmtime_r(&now,&utcTime);
+#endif
+  char buffer[32];
+  strftime(buffer,sizeof(buffer),"%Y-%m-%dT%H:%M:%SZ",&utcTime);
+  return string(buffer);
+}
+
+string GetOpenSSLError(const string& fallback) {
+  unsigned long code = ERR_get_error();
+  if(code == 0)
+    return fallback;
+  char buffer[256];
+  ERR_error_string_n(code,buffer,sizeof(buffer));
+  return string(buffer);
+}
+
+bool LoadRecipientPublicKey(const string& publicKeyFile,ScopedEvpPkey& recipientKey,string* errorMessage) {
+  ScopedFile keyFile(fopen(publicKeyFile.c_str(),"rb"));
+  if(keyFile.handle == NULL) {
+    *errorMessage = "Cannot read public key file";
+    return false;
+  }
+
+  ScopedRsa rsa;
+  rsa.handle = PEM_read_RSA_PUBKEY(keyFile.handle,NULL,NULL,NULL);
+  if(rsa.handle == NULL) {
+    *errorMessage = GetOpenSSLError("Public key file is not a valid PEM RSA public key");
+    return false;
+  }
+
+  recipientKey.handle = EVP_PKEY_new();
+  if(recipientKey.handle == NULL) {
+    *errorMessage = GetOpenSSLError("Failed to allocate EVP_PKEY");
+    return false;
+  }
+  if(EVP_PKEY_assign_RSA(recipientKey.handle,rsa.handle) != 1) {
+    *errorMessage = GetOpenSSLError("Failed to assign RSA public key");
+    return false;
+  }
+  rsa.handle = NULL;
+  return true;
+}
+
+bool EncryptPayloadWithOpenSSL(const string& publicKeyFile,const string& payload,string& artifact,string& errorMessage) {
+  ScopedEvpPkey recipientKey;
+  if(!LoadRecipientPublicKey(publicKeyFile,recipientKey,&errorMessage))
+    return false;
+
+  vector<unsigned char> aesKey(32);
+  vector<unsigned char> iv(12);
+  if(RAND_bytes(&aesKey[0],(int)aesKey.size()) != 1 ||
+     RAND_bytes(&iv[0],(int)iv.size()) != 1) {
+    errorMessage = GetOpenSSLError("Failed to generate encryption randomness");
+    return false;
+  }
+
+  vector<unsigned char> plaintext(payload.begin(),payload.end());
+  vector<unsigned char> ciphertext(plaintext.size() + 16);
+  vector<unsigned char> tag(16);
+  int outLen = 0;
+  int totalLen = 0;
+  ScopedEvpCipherCtx cipherCtx;
+  if(cipherCtx.handle == NULL) {
+    errorMessage = GetOpenSSLError("Failed to allocate cipher context");
+    return false;
+  }
+  if(EVP_EncryptInit_ex(cipherCtx.handle,EVP_aes_256_gcm(),NULL,NULL,NULL) != 1 ||
+     EVP_CIPHER_CTX_ctrl(cipherCtx.handle,EVP_CTRL_GCM_SET_IVLEN,(int)iv.size(),NULL) != 1 ||
+     EVP_EncryptInit_ex(cipherCtx.handle,NULL,NULL,&aesKey[0],&iv[0]) != 1 ||
+     EVP_EncryptUpdate(cipherCtx.handle,
+                       plaintext.empty() ? NULL : &ciphertext[0],&outLen,
+                       plaintext.empty() ? NULL : &plaintext[0],(int)plaintext.size()) != 1) {
+    errorMessage = GetOpenSSLError("Failed to encrypt payload with AES-256-GCM");
+    return false;
+  }
+  totalLen = outLen;
+  if(EVP_EncryptFinal_ex(cipherCtx.handle,&ciphertext[0] + totalLen,&outLen) != 1 ||
+     EVP_CIPHER_CTX_ctrl(cipherCtx.handle,EVP_CTRL_GCM_GET_TAG,(int)tag.size(),&tag[0]) != 1) {
+    errorMessage = GetOpenSSLError("Failed to finalize AES-256-GCM encryption");
+    return false;
+  }
+  totalLen += outLen;
+  ciphertext.resize((size_t)totalLen);
+
+  ScopedEvpPkeyCtx pkeyCtx(recipientKey.handle);
+  if(pkeyCtx.handle == NULL) {
+    errorMessage = GetOpenSSLError("Failed to allocate public key context");
+    return false;
+  }
+  if(EVP_PKEY_encrypt_init(pkeyCtx.handle) != 1 ||
+     EVP_PKEY_CTX_set_rsa_padding(pkeyCtx.handle,RSA_PKCS1_OAEP_PADDING) <= 0 ||
+     EVP_PKEY_CTX_set_rsa_oaep_md(pkeyCtx.handle,EVP_sha256()) <= 0 ||
+     EVP_PKEY_CTX_set_rsa_mgf1_md(pkeyCtx.handle,EVP_sha256()) <= 0) {
+    errorMessage = GetOpenSSLError("Failed to initialize RSA-OAEP encryption");
+    return false;
+  }
+  size_t wrappedKeyLen = 0;
+  if(EVP_PKEY_encrypt(pkeyCtx.handle,NULL,&wrappedKeyLen,&aesKey[0],aesKey.size()) != 1) {
+    errorMessage = GetOpenSSLError("Failed to size RSA-encrypted AES key");
+    return false;
+  }
+  vector<unsigned char> wrappedKey(wrappedKeyLen);
+  if(EVP_PKEY_encrypt(pkeyCtx.handle,&wrappedKey[0],&wrappedKeyLen,&aesKey[0],aesKey.size()) != 1) {
+    errorMessage = GetOpenSSLError("Failed to encrypt AES key with RSA-OAEP");
+    return false;
+  }
+  wrappedKey.resize(wrappedKeyLen);
+
+  ostringstream out;
+  out << "{\n"
+      << "  \"version\": 1,\n"
+      << "  \"rsa_encrypted_key\": \"" << Base64Encode(&wrappedKey[0],wrappedKey.size()) << "\",\n"
+      << "  \"iv\": \"" << Base64Encode(&iv[0],iv.size()) << "\",\n"
+      << "  \"ciphertext\": \"" << Base64Encode(ciphertext.empty() ? (const unsigned char*)"" : &ciphertext[0],ciphertext.size()) << "\",\n"
+      << "  \"tag\": \"" << Base64Encode(&tag[0],tag.size()) << "\",\n"
+      << "  \"key_encryption\": \"RSA-OAEP-SHA256\",\n"
+      << "  \"content_encryption\": \"AES-256-GCM\"\n"
+      << "}\n";
+  artifact = out.str();
+  return true;
+}
+
+bool ValidateWritableOutputPath(const string& outputFile,uint32_t pid,string* errorMessage) {
+  string outputDir = GetDirectoryName(outputFile);
+  if(outputDir.length() == 0)
+    outputDir = ".";
+
+  ostringstream tempName;
+  tempName << ".kangaroo-output-check-" << pid << "-" << (long long)time(NULL) << ".tmp";
+  string tempPath = JoinPath(outputDir,tempName.str());
+
+  ScopedFile tempFile(fopen(tempPath.c_str(),"wb"));
+  if(tempFile.handle == NULL) {
+    *errorMessage = string("Output directory is not writable: ") + strerror(errno);
+    return false;
+  }
+  fclose(tempFile.handle);
+  tempFile.handle = NULL;
+  if(remove(tempPath.c_str()) != 0) {
+    *errorMessage = string("Failed to remove validation temp file: ") + strerror(errno);
+    return false;
+  }
+  return true;
+}
+
+}  // namespace
 
 static void solver_sig_handler(int signo) {
   if(signo == SIGINT || signo == SIGTERM) {
@@ -49,7 +339,7 @@ void Kangaroo::SetRunResult(RunResult result) {
 // ----------------------------------------------------------------------------
 
 Kangaroo::Kangaroo(Secp256K1 *secp,int32_t initDPSize,bool useGpu,string &workFile,string &iWorkFile,uint32_t savePeriod,bool saveKangaroo,bool saveKangarooByServer,
-                   double maxStep,int wtimeout,int port,int ntimeout,string serverIp,string outputFile,bool splitWorkfile) {
+                   double maxStep,int wtimeout,int port,int ntimeout,string serverIp,string outputFile,string publicKeyFile,bool splitWorkfile) {
 
   this->secp = secp;
   this->initDPSize = initDPSize;
@@ -70,6 +360,7 @@ Kangaroo::Kangaroo(Secp256K1 *secp,int32_t initDPSize,bool useGpu,string &workFi
   this->ntimeout = ntimeout;
   this->serverIp = serverIp;
   this->outputFile = outputFile;
+  this->publicKeyFile = publicKeyFile;
   this->hostInfo = NULL;
   this->endOfSearch = false;
   this->saveRequest = false;
@@ -159,6 +450,44 @@ bool Kangaroo::ParseConfigFile(std::string &fileName) {
 
 }
 
+bool Kangaroo::ValidateEncryptedOutputConfiguration() {
+  if(publicKeyFile.length() == 0)
+    return true;
+
+  if(outputFile.length() == 0) {
+    printf("Error: --pubkey requires -o <path> for the encrypted artifact\n");
+    SetRunResult(RESULT_OUTPUT_ERROR);
+    return false;
+  }
+
+  ScopedFile publicKey(fopen(publicKeyFile.c_str(),"rb"));
+  if(publicKey.handle == NULL) {
+    printf("Error: Cannot open public key file %s: %s\n",publicKeyFile.c_str(),strerror(errno));
+    SetRunResult(RESULT_OUTPUT_ERROR);
+    return false;
+  }
+
+  ScopedEvpPkey publicKeyHandle;
+  string errorMessage;
+  if(!LoadRecipientPublicKey(publicKeyFile,publicKeyHandle,&errorMessage)) {
+    printf("Error: %s\n",errorMessage.c_str());
+    SetRunResult(RESULT_OUTPUT_ERROR);
+    return false;
+  }
+
+  if(!ValidateWritableOutputPath(outputFile,pid,&errorMessage)) {
+    printf("Error: %s\n",errorMessage.c_str());
+    SetRunResult(RESULT_OUTPUT_ERROR);
+    return false;
+  }
+
+  return true;
+}
+
+bool Kangaroo::ValidateOutputConfiguration() {
+  return ValidateEncryptedOutputConfiguration();
+}
+
 // ----------------------------------------------------------------------------
 
 bool Kangaroo::IsDP(uint64_t x) {
@@ -189,8 +518,7 @@ void Kangaroo::SetDP(int size) {
 
 // ----------------------------------------------------------------------------
 
-bool Kangaroo::Output(Int *pk,char sInfo,int sType) {
-
+bool Kangaroo::WritePlaintextResult(Int *pk,char sInfo,int sType) {
 
   FILE* f = stdout;
   bool needToClose = false;
@@ -221,10 +549,85 @@ bool Kangaroo::Output(Int *pk,char sInfo,int sType) {
     return false;
   }
 
-
   if(needToClose)
     fclose(f);
 
+  return true;
+
+}
+
+string Kangaroo::BuildEncryptedPayload(Int *pk,char sInfo,int sType) const {
+  Point matchedPoint = keysToSearch[keyIdx];
+  Point recoveredPoint = secp->ComputePublicKey(pk);
+  Int privateKeyCopy(*pk);
+  Int rangeStartCopy(rangeStart);
+  Int rangeEndCopy(rangeEnd);
+
+  string matchedPubHex = secp->GetPublicKeyHex(true,matchedPoint);
+  string recoveredPubHex = secp->GetPublicKeyHex(true,recoveredPoint);
+  string recoveredPrivHex = privateKeyCopy.GetBase16();
+  string rangeStartHex = rangeStartCopy.GetBase16();
+  string rangeEndHex = rangeEndCopy.GetBase16();
+
+  ostringstream payload;
+  payload << "{\n"
+          << "  \"schema_version\": 1,\n"
+          << "  \"artifact_type\": \"kangaroo-recovered-result\",\n"
+          << "  \"curve_name\": \"secp256k1\",\n"
+          << "  \"timestamp_utc\": \"" << JsonEscape(GetUtcTimestamp()) << "\",\n"
+          << "  \"key_index\": " << keyIdx << ",\n"
+          << "  \"match_type\": \"" << sInfo << "\",\n"
+          << "  \"solution_type\": " << sType << ",\n"
+          << "  \"matched_public_key\": \"0x" << JsonEscape(matchedPubHex) << "\",\n"
+          << "  \"recovered_public_key\": \"0x" << JsonEscape(recoveredPubHex) << "\",\n"
+          << "  \"recovered_private_key\": \"0x" << JsonEscape(recoveredPrivHex) << "\",\n"
+          << "  \"search_range_start\": \"0x" << JsonEscape(rangeStartHex) << "\",\n"
+          << "  \"search_range_end\": \"0x" << JsonEscape(rangeEndHex) << "\"\n"
+          << "}\n";
+  return payload.str();
+}
+
+bool Kangaroo::WriteEncryptedResult(Int *pk,char sInfo,int sType) {
+  string artifact;
+  string errorMessage;
+  string payload = BuildEncryptedPayload(pk,sInfo,sType);
+
+  if(!EncryptPayloadWithOpenSSL(publicKeyFile,payload,artifact,errorMessage)) {
+    printf("\nEncrypted output failed: %s\n",errorMessage.c_str());
+    return false;
+  }
+
+  FILE* out = fopen(outputFile.c_str(),"wb");
+  if(out == NULL) {
+    printf("\nCannot open %s for writing encrypted result: %s\n",outputFile.c_str(),strerror(errno));
+    return false;
+  }
+
+  size_t written = fwrite(artifact.data(),1,artifact.size(),out);
+  bool closeOk = fclose(out) == 0;
+  if(written != artifact.size() || !closeOk) {
+    printf("\nFailed to write encrypted result to %s\n",outputFile.c_str());
+    return false;
+  }
+
+  printf("\nKey#%2d [%d%c] encrypted result written to %s\n",keyIdx,sType,sInfo,outputFile.c_str());
+  return true;
+}
+
+bool Kangaroo::Output(Int *pk,char sInfo,int sType) {
+
+  Point PR = secp->ComputePublicKey(pk);
+  if(!PR.equals(keysToSearch[keyIdx])) {
+    if(publicKeyFile.length() == 0) {
+      ::printf("\n");
+      ::printf("Key#%2d [%d%c]Pub:  0x%s \n",keyIdx,sType,sInfo,secp->GetPublicKeyHex(true,keysToSearch[keyIdx]).c_str());
+      ::printf("       Failed !\n");
+    }
+    return false;
+  }
+
+  bool ok = publicKeyFile.length() > 0 ? WriteEncryptedResult(pk,sInfo,sType) : WritePlaintextResult(pk,sInfo,sType);
+  SetRunResult(ok ? RESULT_KEY_FOUND : RESULT_OUTPUT_ERROR);
   return true;
 
 }
@@ -251,10 +654,7 @@ bool  Kangaroo::CheckKey(Int d1,Int d2,uint8_t type) {
     pk.ModAddK1order(&rangeWidthDiv2);
 #endif
     pk.ModAddK1order(&rangeStart);    
-    bool solved = Output(&pk,'N',type);
-    if(solved)
-      SetRunResult(RESULT_KEY_FOUND);
-    return solved;
+    return Output(&pk,'N',type);
   }
 
   if(P.equals(keyToSearchNeg)) {
@@ -264,10 +664,7 @@ bool  Kangaroo::CheckKey(Int d1,Int d2,uint8_t type) {
     pk.ModAddK1order(&rangeWidthDiv2);
 #endif
     pk.ModAddK1order(&rangeStart);
-    bool solved = Output(&pk,'S',type);
-    if(solved)
-      SetRunResult(RESULT_KEY_FOUND);
-    return solved;
+    return Output(&pk,'S',type);
   }
 
   return false;
@@ -316,6 +713,9 @@ bool Kangaroo::CollisionCheck(Int* d1,uint32_t type1,Int* d2,uint32_t type2) {
       return false;
 
     }
+
+    if(GetRunResult() == RESULT_OUTPUT_ERROR)
+      return true;
 
   }
 
