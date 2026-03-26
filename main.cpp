@@ -197,7 +197,7 @@ struct ResumeFileStatus {
 
 static ResumeFileStatus GetResumeFileStatus(const string& path) {
 
-  STAT_STRUCT st;
+  struct STAT_STRUCT st;
   if(STAT_FUNC(path.c_str(),&st) != 0) {
     if(errno == ENOENT)
       return { false,false,0 };
