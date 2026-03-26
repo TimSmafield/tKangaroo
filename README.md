@@ -54,6 +54,24 @@ Kangaroo [-v] [-t nbThread] [-d dpBit] [gpu] [-check]
  inFile: intput configuration file
 ```
 
+Encrypted result mode uses hybrid encryption with OpenSSL: the recovered-result JSON payload is encrypted with AES-256-GCM, and that AES key is encrypted with the recipient RSA public key using RSA-OAEP-SHA256. When `--pubkey` is set, Kangaroo writes only the encrypted artifact to `-o` and does not write the plaintext private key to disk.
+
+Example:
+
+```bash
+./kangaroo -o run.out in.txt
+./kangaroo -o run.enc --pubkey recipient_pub.pem in.txt
+```
+
+Decryption outline:
+
+```bash
+openssl pkeyutl -decrypt -inkey recipient_priv.pem -in wrapped_key.bin -out aes_key.bin \
+  -pkeyopt rsa_padding_mode:oaep -pkeyopt rsa_oaep_md:sha256
+openssl enc -d -aes-256-gcm -K "$(xxd -p -c 256 aes_key.bin)" -iv "<iv-hex>" \
+  -in ciphertext.bin -out payload.json -nosalt -tag "<tag-hex>"
+```
+
 Structure of the input file:
 * All values are in hex format
 * Public keys can be given either in compressed or uncompressed format

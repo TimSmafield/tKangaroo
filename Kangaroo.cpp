@@ -31,14 +31,12 @@
 #include <vector>
 #ifndef WIN64
 #include <pthread.h>
-#include <sys/stat.h>
 #endif
-#ifdef WIN64
-#include <bcrypt.h>
-#include <wincrypt.h>
-#pragma comment(lib,"bcrypt.lib")
-#pragma comment(lib,"crypt32.lib")
-#endif
+#include <openssl/err.h>
+#include <openssl/evp.h>
+#include <openssl/pem.h>
+#include <openssl/rand.h>
+#include <openssl/rsa.h>
 
 using namespace std;
 
@@ -46,6 +44,51 @@ using namespace std;
 volatile sig_atomic_t g_stopRequested = 0;
 
 namespace {
+
+struct ScopedFile {
+  FILE* handle;
+  ScopedFile(FILE* file = NULL) : handle(file) {}
+  ~ScopedFile() {
+    if(handle != NULL)
+      fclose(handle);
+  }
+};
+
+struct ScopedEvpCipherCtx {
+  EVP_CIPHER_CTX* handle;
+  ScopedEvpCipherCtx() : handle(EVP_CIPHER_CTX_new()) {}
+  ~ScopedEvpCipherCtx() {
+    if(handle != NULL)
+      EVP_CIPHER_CTX_free(handle);
+  }
+};
+
+struct ScopedEvpPkeyCtx {
+  EVP_PKEY_CTX* handle;
+  explicit ScopedEvpPkeyCtx(EVP_PKEY* pkey) : handle(EVP_PKEY_CTX_new(pkey,NULL)) {}
+  ~ScopedEvpPkeyCtx() {
+    if(handle != NULL)
+      EVP_PKEY_CTX_free(handle);
+  }
+};
+
+struct ScopedEvpPkey {
+  EVP_PKEY* handle;
+  ScopedEvpPkey() : handle(NULL) {}
+  ~ScopedEvpPkey() {
+    if(handle != NULL)
+      EVP_PKEY_free(handle);
+  }
+};
+
+struct ScopedRsa {
+  RSA* handle;
+  ScopedRsa() : handle(NULL) {}
+  ~ScopedRsa() {
+    if(handle != NULL)
+      RSA_free(handle);
+  }
+};
 
 string JsonEscape(const string& value) {
   string escaped;
@@ -117,6 +160,15 @@ string GetDirectoryName(const string& path) {
   return path.substr(0,pos);
 }
 
+string JoinPath(const string& dir,const string& fileName) {
+  if(dir.length() == 0 || dir == ".")
+    return fileName;
+  char last = dir[dir.length() - 1];
+  if(last == '/' || last == '\\')
+    return dir + fileName;
+  return dir + "/" + fileName;
+}
+
 string GetUtcTimestamp() {
   time_t now = time(NULL);
   struct tm utcTime;
@@ -130,205 +182,143 @@ string GetUtcTimestamp() {
   return string(buffer);
 }
 
-#ifdef WIN64
-
-struct ScopedBCryptAlgHandle {
-  BCRYPT_ALG_HANDLE handle;
-  ScopedBCryptAlgHandle() : handle(NULL) {}
-  ~ScopedBCryptAlgHandle() {
-    if(handle != NULL)
-      BCryptCloseAlgorithmProvider(handle,0);
-  }
-};
-
-struct ScopedBCryptKeyHandle {
-  BCRYPT_KEY_HANDLE handle;
-  ScopedBCryptKeyHandle() : handle(NULL) {}
-  ~ScopedBCryptKeyHandle() {
-    if(handle != NULL)
-      BCryptDestroyKey(handle);
-  }
-};
-
-bool ReadFileBytes(const string& path,vector<unsigned char>& out) {
-  FILE* file = fopen(path.c_str(),"rb");
-  if(file == NULL)
-    return false;
-  if(fseek(file,0,SEEK_END) != 0) {
-    fclose(file);
-    return false;
-  }
-  long size = ftell(file);
-  if(size < 0) {
-    fclose(file);
-    return false;
-  }
-  rewind(file);
-  out.resize((size_t)size);
-  if(size > 0) {
-    size_t readCount = fread(&out[0],1,(size_t)size,file);
-    if(readCount != (size_t)size) {
-      fclose(file);
-      return false;
-    }
-  }
-  fclose(file);
-  return true;
+string GetOpenSSLError(const string& fallback) {
+  unsigned long code = ERR_get_error();
+  if(code == 0)
+    return fallback;
+  char buffer[256];
+  ERR_error_string_n(code,buffer,sizeof(buffer));
+  return string(buffer);
 }
 
-bool LoadRecipientPublicKey(const string& publicKeyFile,BCRYPT_KEY_HANDLE* publicKey,string* errorMessage) {
-  vector<unsigned char> fileBytes;
-  if(!ReadFileBytes(publicKeyFile,fileBytes)) {
+bool LoadRecipientPublicKey(const string& publicKeyFile,ScopedEvpPkey& recipientKey,string* errorMessage) {
+  ScopedFile keyFile(fopen(publicKeyFile.c_str(),"rb"));
+  if(keyFile.handle == NULL) {
     *errorMessage = "Cannot read public key file";
     return false;
   }
 
-  DWORD derSize = 0;
-  vector<unsigned char> derBytes;
-  const char* rawText = fileBytes.empty() ? "" : (const char*)&fileBytes[0];
-  DWORD rawSize = (DWORD)fileBytes.size();
-  if(CryptStringToBinaryA(rawText,rawSize,CRYPT_STRING_ANY,NULL,&derSize,NULL,NULL)) {
-    derBytes.resize(derSize);
-    if(!CryptStringToBinaryA(rawText,rawSize,CRYPT_STRING_ANY,&derBytes[0],&derSize,NULL,NULL)) {
-      *errorMessage = "Failed to decode PEM public key";
-      return false;
-    }
-    derBytes.resize(derSize);
-  } else {
-    derBytes = fileBytes;
-  }
-
-  CERT_PUBLIC_KEY_INFO* publicKeyInfo = NULL;
-  DWORD publicKeyInfoSize = 0;
-  if(!CryptDecodeObjectEx(X509_ASN_ENCODING,X509_PUBLIC_KEY_INFO,
-                          derBytes.empty() ? NULL : &derBytes[0],(DWORD)derBytes.size(),
-                          CRYPT_DECODE_ALLOC_FLAG,NULL,&publicKeyInfo,&publicKeyInfoSize)) {
-    *errorMessage = "Public key file is not a valid X.509 SubjectPublicKeyInfo";
+  ScopedRsa rsa;
+  rsa.handle = PEM_read_RSA_PUBKEY(keyFile.handle,NULL,NULL,NULL);
+  if(rsa.handle == NULL) {
+    *errorMessage = GetOpenSSLError("Public key file is not a valid PEM RSA public key");
     return false;
   }
 
-  bool ok = false;
-  if(publicKeyInfo->Algorithm.pszObjId != NULL &&
-     strcmp(publicKeyInfo->Algorithm.pszObjId,szOID_RSA_RSA) == 0) {
-    if(CryptImportPublicKeyInfoEx2(X509_ASN_ENCODING,publicKeyInfo,0,NULL,publicKey)) {
-      ok = true;
-    } else {
-      *errorMessage = "Failed to import RSA public key";
-    }
-  } else {
-    *errorMessage = "Only RSA public keys are supported for --pubkey";
+  recipientKey.handle = EVP_PKEY_new();
+  if(recipientKey.handle == NULL) {
+    *errorMessage = GetOpenSSLError("Failed to allocate EVP_PKEY");
+    return false;
   }
-
-  LocalFree(publicKeyInfo);
-  return ok;
+  if(EVP_PKEY_assign_RSA(recipientKey.handle,rsa.handle) != 1) {
+    *errorMessage = GetOpenSSLError("Failed to assign RSA public key");
+    return false;
+  }
+  rsa.handle = NULL;
+  return true;
 }
 
-bool EncryptPayloadWithWindowsCng(const string& publicKeyFile,const string& payload,string& artifact,string& errorMessage) {
-  ScopedBCryptKeyHandle recipientKey;
-  if(!LoadRecipientPublicKey(publicKeyFile,&recipientKey.handle,&errorMessage))
+bool EncryptPayloadWithOpenSSL(const string& publicKeyFile,const string& payload,string& artifact,string& errorMessage) {
+  ScopedEvpPkey recipientKey;
+  if(!LoadRecipientPublicKey(publicKeyFile,recipientKey,&errorMessage))
     return false;
 
   vector<unsigned char> aesKey(32);
-  vector<unsigned char> nonce(12);
-  if(BCryptGenRandom(NULL,&aesKey[0],(ULONG)aesKey.size(),BCRYPT_USE_SYSTEM_PREFERRED_RNG) < 0 ||
-     BCryptGenRandom(NULL,&nonce[0],(ULONG)nonce.size(),BCRYPT_USE_SYSTEM_PREFERRED_RNG) < 0) {
-    errorMessage = "Failed to generate encryption randomness";
+  vector<unsigned char> iv(12);
+  if(RAND_bytes(&aesKey[0],(int)aesKey.size()) != 1 ||
+     RAND_bytes(&iv[0],(int)iv.size()) != 1) {
+    errorMessage = GetOpenSSLError("Failed to generate encryption randomness");
     return false;
   }
-
-  BCRYPT_OAEP_PADDING_INFO oaepInfo;
-  memset(&oaepInfo,0,sizeof(oaepInfo));
-  oaepInfo.pszAlgId = BCRYPT_SHA256_ALGORITHM;
-
-  ULONG wrappedKeySize = 0;
-  NTSTATUS status = BCryptEncrypt(recipientKey.handle,&aesKey[0],(ULONG)aesKey.size(),&oaepInfo,NULL,0,NULL,0,&wrappedKeySize,BCRYPT_PAD_OAEP);
-  if(status < 0) {
-    errorMessage = "Failed to size RSA-OAEP wrapped key";
-    return false;
-  }
-
-  vector<unsigned char> wrappedKey(wrappedKeySize);
-  status = BCryptEncrypt(recipientKey.handle,&aesKey[0],(ULONG)aesKey.size(),&oaepInfo,NULL,0,&wrappedKey[0],wrappedKeySize,&wrappedKeySize,BCRYPT_PAD_OAEP);
-  if(status < 0) {
-    errorMessage = "Failed to wrap AES key with RSA-OAEP";
-    return false;
-  }
-  wrappedKey.resize(wrappedKeySize);
-
-  ScopedBCryptAlgHandle aesAlg;
-  status = BCryptOpenAlgorithmProvider(&aesAlg.handle,BCRYPT_AES_ALGORITHM,NULL,0);
-  if(status < 0) {
-    errorMessage = "Failed to open AES provider";
-    return false;
-  }
-
-  status = BCryptSetProperty(aesAlg.handle,BCRYPT_CHAINING_MODE,(PUCHAR)BCRYPT_CHAIN_MODE_GCM,sizeof(BCRYPT_CHAIN_MODE_GCM),0);
-  if(status < 0) {
-    errorMessage = "Failed to configure AES-GCM";
-    return false;
-  }
-
-  DWORD objectSize = 0;
-  ULONG cbResult = 0;
-  status = BCryptGetProperty(aesAlg.handle,BCRYPT_OBJECT_LENGTH,(PUCHAR)&objectSize,sizeof(objectSize),&cbResult,0);
-  if(status < 0) {
-    errorMessage = "Failed to query AES key object size";
-    return false;
-  }
-
-  ScopedBCryptKeyHandle aesKeyHandle;
-  vector<unsigned char> keyObject(objectSize);
-  status = BCryptGenerateSymmetricKey(aesAlg.handle,&aesKeyHandle.handle,&keyObject[0],objectSize,&aesKey[0],(ULONG)aesKey.size(),0);
-  if(status < 0) {
-    errorMessage = "Failed to create AES-GCM key";
-    return false;
-  }
-
-  vector<unsigned char> tag(16);
-  BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO authInfo;
-  BCRYPT_INIT_AUTH_MODE_INFO(authInfo);
-  authInfo.pbNonce = &nonce[0];
-  authInfo.cbNonce = (ULONG)nonce.size();
-  authInfo.pbTag = &tag[0];
-  authInfo.cbTag = (ULONG)tag.size();
 
   vector<unsigned char> plaintext(payload.begin(),payload.end());
-  ULONG cipherSize = 0;
-  status = BCryptEncrypt(aesKeyHandle.handle,
-                         plaintext.empty() ? NULL : &plaintext[0],(ULONG)plaintext.size(),
-                         &authInfo,NULL,0,NULL,0,&cipherSize,0);
-  if(status < 0) {
-    errorMessage = "Failed to size AES-GCM ciphertext";
+  vector<unsigned char> ciphertext(plaintext.size() + 16);
+  vector<unsigned char> tag(16);
+  int outLen = 0;
+  int totalLen = 0;
+  ScopedEvpCipherCtx cipherCtx;
+  if(cipherCtx.handle == NULL) {
+    errorMessage = GetOpenSSLError("Failed to allocate cipher context");
     return false;
   }
+  if(EVP_EncryptInit_ex(cipherCtx.handle,EVP_aes_256_gcm(),NULL,NULL,NULL) != 1 ||
+     EVP_CIPHER_CTX_ctrl(cipherCtx.handle,EVP_CTRL_GCM_SET_IVLEN,(int)iv.size(),NULL) != 1 ||
+     EVP_EncryptInit_ex(cipherCtx.handle,NULL,NULL,&aesKey[0],&iv[0]) != 1 ||
+     EVP_EncryptUpdate(cipherCtx.handle,
+                       plaintext.empty() ? NULL : &ciphertext[0],&outLen,
+                       plaintext.empty() ? NULL : &plaintext[0],(int)plaintext.size()) != 1) {
+    errorMessage = GetOpenSSLError("Failed to encrypt payload with AES-256-GCM");
+    return false;
+  }
+  totalLen = outLen;
+  if(EVP_EncryptFinal_ex(cipherCtx.handle,&ciphertext[0] + totalLen,&outLen) != 1 ||
+     EVP_CIPHER_CTX_ctrl(cipherCtx.handle,EVP_CTRL_GCM_GET_TAG,(int)tag.size(),&tag[0]) != 1) {
+    errorMessage = GetOpenSSLError("Failed to finalize AES-256-GCM encryption");
+    return false;
+  }
+  totalLen += outLen;
+  ciphertext.resize((size_t)totalLen);
 
-  vector<unsigned char> ciphertext(cipherSize);
-  status = BCryptEncrypt(aesKeyHandle.handle,
-                         plaintext.empty() ? NULL : &plaintext[0],(ULONG)plaintext.size(),
-                         &authInfo,NULL,0,
-                         ciphertext.empty() ? NULL : &ciphertext[0],cipherSize,&cipherSize,0);
-  if(status < 0) {
-    errorMessage = "Failed to encrypt payload with AES-GCM";
+  ScopedEvpPkeyCtx pkeyCtx(recipientKey.handle);
+  if(pkeyCtx.handle == NULL) {
+    errorMessage = GetOpenSSLError("Failed to allocate public key context");
     return false;
   }
-  ciphertext.resize(cipherSize);
+  if(EVP_PKEY_encrypt_init(pkeyCtx.handle) != 1 ||
+     EVP_PKEY_CTX_set_rsa_padding(pkeyCtx.handle,RSA_PKCS1_OAEP_PADDING) <= 0 ||
+     EVP_PKEY_CTX_set_rsa_oaep_md(pkeyCtx.handle,EVP_sha256()) <= 0 ||
+     EVP_PKEY_CTX_set_rsa_mgf1_md(pkeyCtx.handle,EVP_sha256()) <= 0) {
+    errorMessage = GetOpenSSLError("Failed to initialize RSA-OAEP encryption");
+    return false;
+  }
+  size_t wrappedKeyLen = 0;
+  if(EVP_PKEY_encrypt(pkeyCtx.handle,NULL,&wrappedKeyLen,&aesKey[0],aesKey.size()) != 1) {
+    errorMessage = GetOpenSSLError("Failed to size RSA-encrypted AES key");
+    return false;
+  }
+  vector<unsigned char> wrappedKey(wrappedKeyLen);
+  if(EVP_PKEY_encrypt(pkeyCtx.handle,&wrappedKey[0],&wrappedKeyLen,&aesKey[0],aesKey.size()) != 1) {
+    errorMessage = GetOpenSSLError("Failed to encrypt AES key with RSA-OAEP");
+    return false;
+  }
+  wrappedKey.resize(wrappedKeyLen);
 
   ostringstream out;
   out << "{\n"
-      << "  \"schema_version\": 1,\n"
-      << "  \"artifact_type\": \"kangaroo-encrypted-result\",\n"
-      << "  \"key_encryption\": \"RSA-OAEP-SHA256\",\n"
-      << "  \"content_encryption\": \"AES-256-GCM\",\n"
-      << "  \"wrapped_key\": \"" << Base64Encode(&wrappedKey[0],wrappedKey.size()) << "\",\n"
-      << "  \"nonce\": \"" << Base64Encode(&nonce[0],nonce.size()) << "\",\n"
+      << "  \"version\": 1,\n"
+      << "  \"rsa_encrypted_key\": \"" << Base64Encode(&wrappedKey[0],wrappedKey.size()) << "\",\n"
+      << "  \"iv\": \"" << Base64Encode(&iv[0],iv.size()) << "\",\n"
+      << "  \"ciphertext\": \"" << Base64Encode(ciphertext.empty() ? (const unsigned char*)"" : &ciphertext[0],ciphertext.size()) << "\",\n"
       << "  \"tag\": \"" << Base64Encode(&tag[0],tag.size()) << "\",\n"
-      << "  \"ciphertext\": \"" << Base64Encode(ciphertext.empty() ? (const unsigned char*)"" : &ciphertext[0],ciphertext.size()) << "\"\n"
+      << "  \"key_encryption\": \"RSA-OAEP-SHA256\",\n"
+      << "  \"content_encryption\": \"AES-256-GCM\"\n"
       << "}\n";
   artifact = out.str();
   return true;
 }
 
-#endif
+bool ValidateWritableOutputPath(const string& outputFile,uint32_t pid,string* errorMessage) {
+  string outputDir = GetDirectoryName(outputFile);
+  if(outputDir.length() == 0)
+    outputDir = ".";
+
+  ostringstream tempName;
+  tempName << ".kangaroo-output-check-" << pid << "-" << (long long)time(NULL) << ".tmp";
+  string tempPath = JoinPath(outputDir,tempName.str());
+
+  ScopedFile tempFile(fopen(tempPath.c_str(),"wb"));
+  if(tempFile.handle == NULL) {
+    *errorMessage = string("Output directory is not writable: ") + strerror(errno);
+    return false;
+  }
+  fclose(tempFile.handle);
+  tempFile.handle = NULL;
+  if(remove(tempPath.c_str()) != 0) {
+    *errorMessage = string("Failed to remove validation temp file: ") + strerror(errno);
+    return false;
+  }
+  return true;
+}
 
 }  // namespace
 
@@ -464,56 +454,34 @@ bool Kangaroo::ValidateEncryptedOutputConfiguration() {
   if(publicKeyFile.length() == 0)
     return true;
 
-#ifndef WIN64
-  printf("Error: --pubkey is only supported in WIN64 builds\n");
-  SetRunResult(RESULT_OUTPUT_ERROR);
-  return false;
-#else
   if(outputFile.length() == 0) {
     printf("Error: --pubkey requires -o <path> for the encrypted artifact\n");
     SetRunResult(RESULT_OUTPUT_ERROR);
     return false;
   }
 
-  FILE* publicKey = fopen(publicKeyFile.c_str(),"rb");
-  if(publicKey == NULL) {
+  ScopedFile publicKey(fopen(publicKeyFile.c_str(),"rb"));
+  if(publicKey.handle == NULL) {
     printf("Error: Cannot open public key file %s: %s\n",publicKeyFile.c_str(),strerror(errno));
     SetRunResult(RESULT_OUTPUT_ERROR);
     return false;
   }
-  fclose(publicKey);
 
-  string outputDir = GetDirectoryName(outputFile);
-  if(outputDir.length() > 0) {
-    DWORD attr = GetFileAttributesA(outputDir.c_str());
-    if(attr == INVALID_FILE_ATTRIBUTES || (attr & FILE_ATTRIBUTE_DIRECTORY) == 0) {
-      printf("Error: Output directory %s does not exist\n",outputDir.c_str());
-      SetRunResult(RESULT_OUTPUT_ERROR);
-      return false;
-    }
-  }
-
-  DWORD outputAttr = GetFileAttributesA(outputFile.c_str());
-  if(outputAttr != INVALID_FILE_ATTRIBUTES && (outputAttr & FILE_ATTRIBUTE_DIRECTORY) == 0) {
-    FILE* existingOutput = fopen(outputFile.c_str(),"ab");
-    if(existingOutput == NULL) {
-      printf("Error: Output path %s is not writable\n",outputFile.c_str());
-      SetRunResult(RESULT_OUTPUT_ERROR);
-      return false;
-    }
-    fclose(existingOutput);
-  }
-
-  ScopedBCryptKeyHandle publicKeyHandle;
+  ScopedEvpPkey publicKeyHandle;
   string errorMessage;
-  if(!LoadRecipientPublicKey(publicKeyFile,&publicKeyHandle.handle,&errorMessage)) {
+  if(!LoadRecipientPublicKey(publicKeyFile,publicKeyHandle,&errorMessage)) {
+    printf("Error: %s\n",errorMessage.c_str());
+    SetRunResult(RESULT_OUTPUT_ERROR);
+    return false;
+  }
+
+  if(!ValidateWritableOutputPath(outputFile,pid,&errorMessage)) {
     printf("Error: %s\n",errorMessage.c_str());
     SetRunResult(RESULT_OUTPUT_ERROR);
     return false;
   }
 
   return true;
-#endif
 }
 
 bool Kangaroo::ValidateOutputConfiguration() {
@@ -612,19 +580,10 @@ bool Kangaroo::WriteEncryptedResult(Int *pk,char sInfo,int sType) {
   string errorMessage;
   string payload = BuildEncryptedPayload(pk,sInfo,sType);
 
-#ifdef WIN64
-  if(!EncryptPayloadWithWindowsCng(publicKeyFile,payload,artifact,errorMessage)) {
+  if(!EncryptPayloadWithOpenSSL(publicKeyFile,payload,artifact,errorMessage)) {
     printf("\nEncrypted output failed: %s\n",errorMessage.c_str());
     return false;
   }
-#else
-  (void)pk;
-  (void)sInfo;
-  (void)sType;
-  errorMessage = "--pubkey is only supported in WIN64 builds";
-  printf("\nEncrypted output failed: %s\n",errorMessage.c_str());
-  return false;
-#endif
 
   FILE* out = fopen(outputFile.c_str(),"wb");
   if(out == NULL) {
