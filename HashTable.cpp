@@ -289,11 +289,13 @@ int HashTable::Add(uint64_t h,ENTRY* e) {
 
       if((e->d.i64[0] == GET(h,mi)->d.i64[0]) && (e->d.i64[1] == GET(h,mi)->d.i64[1])) {
         // Same point added 2 times or collision in same herd !
+        free(e);
         return ADD_DUPLICATE;
       }
 
       // Collision
       CalcDistAndType(GET(h,mi)->d , &kDist, &kType);
+      free(e);
       return ADD_COLLISION;
 
     } else {

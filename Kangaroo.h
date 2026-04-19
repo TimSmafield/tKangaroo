@@ -38,6 +38,8 @@ typedef int SOCKET;
 
 #include <string>
 #include <vector>
+#include <map>
+#include <set>
 #include <signal.h>
 #include "SECPK1/SECP256k1.h"
 #include "HashTable.h"
@@ -124,10 +126,33 @@ typedef struct {
 
 } DPHEADER;
 
+struct DPWORKER {
+  uint32_t processId;
+  uint32_t threadId;
+  uint32_t gpuId;
+
+  bool operator<(const DPWORKER& other) const {
+    if(processId != other.processId)
+      return processId < other.processId;
+    if(threadId != other.threadId)
+      return threadId < other.threadId;
+    return gpuId < other.gpuId;
+  }
+};
+
+typedef struct {
+
+  uint32_t header;
+  int32_t status;
+  uint32_t nbReset;
+
+} DPREPLYHEADER;
+
 // DP cache
 typedef struct {
   uint32_t nbDP;
   DP *dp;
+  DPWORKER worker;
 } DP_CACHE;
 
 // Work file type
@@ -183,7 +208,7 @@ private:
   void CreateJumpTable();
   bool AddToTable(uint64_t h,int128_t *x,int128_t *d);
   bool AddToTable(Int *pos,Int *dist,uint32_t kType);
-  bool SendToServer(std::vector<ITEM> &dp,uint32_t threadId,uint32_t gpuId);
+  bool SendToServer(std::vector<ITEM> &dp,uint32_t threadId,uint32_t gpuId,std::vector<uint32_t> *deadWalkers = NULL);
   bool CheckKey(Int d1,Int d2,uint8_t type);
   bool CollisionCheck(Int* d1,uint32_t type1,Int* d2,uint32_t type2);
   void ComputeExpected(double dp,double *op,double *ram,double* overHead = NULL);
@@ -318,6 +343,7 @@ private:
   SOCKET serverConn;
   std::vector<DP_CACHE> recvDP;
   std::vector<DP_CACHE> localCache;
+  std::map<DPWORKER,std::set<uint32_t> > pendingDeadWalkers;
   std::string serverStatus;
   int connectedClient;
   uint32_t pid;

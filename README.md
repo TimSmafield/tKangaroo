@@ -229,6 +229,7 @@ Key# 0 [1S]Pub:  0x03BB113592002132E6EF387C3AEBC04667670D4CD40B2103C7D0EE4969E9F
 Note on -wss option:
 
 The wss option allow to use the server to make kangaroo backups, the client send kangaroo (in compressed format) to the server. When a client restart with -wss option, it tries to download the backup. If the specified file is not found by the server, the client creates new kangaroos. There is no need to use -i option here. Make sure when restarting a new job with a different range or key, that the client does not download an old backup. Make sure that when a backup is downloaded, that no kangaroos are created or not handled by the client. This option is usefull if you cannot rely on client side to handle kangaoo backup.
+Restarting a client without its kangaroo backup still creates fresh walkers and increases the DP overhead, so backups remain the recommended way to preserve work after a restart.
 
 Send kangaroo to the server every 20 second and, when starting, try to download kang.
 ```
@@ -238,6 +239,8 @@ Send kangaroo to the server every 20 second and, when starting, try to download 
 # Distributed clients and central server(s)
 
 It is possible to run Kangaroo in client/server mode. The server has the same options as the standard program except that you have to specify manually the number of distinguished point bits number using -d. All clients which connect will get back the configuration from the server. At the moment, the server is limited to one single key. If you restart the server with a different configuration (range or key), you need to stop all clients otherwise they will reconnect and send wrong points.
+Client/server dead walkers are now reseeded by the owning client after the server reports the affected kangaroo indices, so the distributed herd no longer shrinks permanently when duplicate or same-herd collisions are detected. The `Dead` counter is still a diagnostic counter, but in distributed mode it no longer implies that walkers were silently lost.
+Client and server binaries must be upgraded together for this behavior: the DP reply protocol changed and mixed versions are rejected.
 
 Starting the server with backup every 5 min, 12 distinguished bits, in64.txt as config file:
 

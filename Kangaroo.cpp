@@ -868,6 +868,7 @@ bool Kangaroo::AddToTable(uint64_t h,int128_t *x,int128_t *d) {
 void Kangaroo::SolveKeyCPU(TH_PARAM *ph) {
 
   vector<ITEM> dps;
+  vector<uint32_t> deadWalkers;
   double lastSent = 0;
 
   // Global init
@@ -982,7 +983,13 @@ void Kangaroo::SolveKeyCPU(TH_PARAM *ph) {
       double now = Timer::get_tick();
       if( now-lastSent > SEND_PERIOD ) {
         LOCK(ghMutex);
-        SendToServer(dps,ph->threadId,0xFFFF);
+        SendToServer(dps,ph->threadId,0xFFFF,&deadWalkers);
+        for(size_t i = 0; i < deadWalkers.size(); i++) {
+          uint32_t kIdx = deadWalkers[i];
+          if(kIdx >= (uint32_t)CPU_GRP_SIZE)
+            continue;
+          CreateHerd(1,&ph->px[kIdx],&ph->py[kIdx],&ph->distance[kIdx],kIdx % 2,false);
+        }
         UNLOCK(ghMutex);
         lastSent = now;
       }
@@ -1052,6 +1059,7 @@ void Kangaroo::SolveKeyGPU(TH_PARAM *ph) {
 
   vector<ITEM> dps;
   vector<ITEM> gpuFound;
+  vector<uint32_t> deadWalkers;
   GPUEngine *gpu;
 
   gpu = new GPUEngine(ph->gridSizeX,ph->gridSizeY,ph->gpuId,65536 * 2);
@@ -1116,7 +1124,17 @@ void Kangaroo::SolveKeyGPU(TH_PARAM *ph) {
       double now = Timer::get_tick();
       if(now - lastSent > SEND_PERIOD) {
         LOCK(ghMutex);
-        SendToServer(dps,ph->threadId,ph->gpuId);
+        SendToServer(dps,ph->threadId,ph->gpuId,&deadWalkers);
+        for(size_t i = 0; i < deadWalkers.size(); i++) {
+          uint32_t kIdx = deadWalkers[i];
+          if(kIdx >= ph->nbKangaroo)
+            continue;
+          Int px;
+          Int py;
+          Int d;
+          CreateHerd(1,&px,&py,&d,kIdx % 2,false);
+          gpu->SetKangaroo(kIdx,&px,&py,&d);
+        }
         UNLOCK(ghMutex);
         lastSent = now;
       }

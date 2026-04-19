@@ -205,11 +205,15 @@ void Kangaroo::ProcessServer() {
     // Add to hashTable
     for(int i = 0; i<(int)localCache.size() && !endOfSearch; i++) {
       DP_CACHE dp = localCache[i];
+      DPWORKER worker = dp.worker;
       for(int j = 0; j<(int)dp.nbDP && !endOfSearch; j++) {
         uint64_t h = dp.dp[j].h;
         if(!AddToTable(h,&dp.dp[j].x,&dp.dp[j].d)) {
           // Collision inside the same herd
           collisionInSameHerd++;
+          LOCK(ghMutex);
+          pendingDeadWalkers[worker].insert(dp.dp[j].kIdx);
+          UNLOCK(ghMutex);
         }
       }
       free(dp.dp);

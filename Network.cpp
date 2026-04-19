@@ -42,7 +42,7 @@ static SOCKET serverSock = 0;
 #define WAIT_FOR_READ  1
 #define WAIT_FOR_WRITE 2
 
-#define SERVER_VERSION 3
+#define SERVER_VERSION 4
 
 #define SERVER_HEADER 0x67DEDDC1
 
@@ -538,8 +538,6 @@ bool Kangaroo::HandleRequest(TH_PARAM *p) {
 
         DP *dp = (DP *)malloc(sizeof(DP)* head.nbDP);
         GETFREE("DP",p->clientSock,dp,sizeof(DP)* head.nbDP,ntimeout,dp);
-        state = GetServerStatus();
-        PUTFREE("Status",p->clientSock,&state,sizeof(int32_t),ntimeout,dp);
 
         if(nbRead != sizeof(DP)* head.nbDP) {
 
@@ -591,10 +589,43 @@ bool Kangaroo::HandleRequest(TH_PARAM *p) {
           }
 #endif
 
+          DPWORKER worker;
+          worker.processId = head.processId;
+          worker.threadId = head.threadId;
+          worker.gpuId = head.gpuId;
+
+          vector<uint32_t> deadWalkers;
           LOCK(ghMutex);
+          map<DPWORKER,set<uint32_t> >::iterator pending = pendingDeadWalkers.find(worker);
+          if(pending != pendingDeadWalkers.end()) {
+            deadWalkers.reserve(pending->second.size());
+            for(set<uint32_t>::iterator it = pending->second.begin(); it != pending->second.end(); ++it)
+              deadWalkers.push_back(*it);
+          }
+          UNLOCK(ghMutex);
+
+          DPREPLYHEADER reply;
+          reply.header = SERVER_HEADER;
+          reply.status = GetServerStatus();
+          reply.nbReset = (uint32_t)deadWalkers.size();
+          PUTFREE("DPReplyHeader",p->clientSock,&reply,sizeof(DPREPLYHEADER),ntimeout,dp);
+          if(reply.nbReset > 0)
+            PUTFREE("DPReset",p->clientSock,&deadWalkers[0],reply.nbReset * sizeof(uint32_t),ntimeout,dp);
+
+          LOCK(ghMutex);
+          if(reply.nbReset > 0) {
+            pending = pendingDeadWalkers.find(worker);
+            if(pending != pendingDeadWalkers.end()) {
+              for(size_t i = 0; i < deadWalkers.size(); i++)
+                pending->second.erase(deadWalkers[i]);
+              if(pending->second.empty())
+                pendingDeadWalkers.erase(pending);
+            }
+          }
           DP_CACHE dc;
           dc.nbDP = head.nbDP;
           dc.dp = dp;
+          dc.worker = worker;
           recvDP.push_back(dc);
           UNLOCK(ghMutex);
 
@@ -721,6 +752,11 @@ RunResult Kangaroo::RunServer() {
 
   if(sizeof(DPHEADER) != 20) {
     ::printf("Error: Invalid DPHEADER size struct\n");
+    SetRunResult(RESULT_FATAL_ERROR);
+    return GetRunResult();
+  }
+  if(sizeof(DPREPLYHEADER) != 12) {
+    ::printf("Error: Invalid DPREPLYHEADER size struct\n");
     SetRunResult(RESULT_FATAL_ERROR);
     return GetRunResult();
   }
@@ -1166,19 +1202,21 @@ bool Kangaroo::SendKangaroosToServer(std::string& fileName,std::vector<int128_t>
 }
 
 // Send DP to Server
-bool Kangaroo::SendToServer(std::vector<ITEM> &dps,uint32_t threadId,uint32_t gpuId) {
+bool Kangaroo::SendToServer(std::vector<ITEM> &dps,uint32_t threadId,uint32_t gpuId,std::vector<uint32_t> *deadWalkers) {
 
   int nbRead;
   int nbWrite;
   uint32_t nbDP = (uint32_t)dps.size();
   if(dps.size()==0)
     return false;
+  if(deadWalkers)
+    deadWalkers->clear();
 
   WaitForServer();
 
   if(!endOfSearch) {
 
-    int32_t status;
+    DPREPLYHEADER reply;
 
     // Send DP
     DP *dp = (DP *)malloc(sizeof(DP)*nbDP);
@@ -1210,7 +1248,46 @@ bool Kangaroo::SendToServer(std::vector<ITEM> &dps,uint32_t threadId,uint32_t gp
     PUTFREE("CMD",serverConn,&cmd,1,ntimeout,dp);
     PUTFREE("DPHeader",serverConn,&head,sizeof(DPHEADER),ntimeout,dp);
     PUTFREE("DP",serverConn,dp,sizeof(DP)*nbDP,ntimeout,dp);
-    GETFREE("Status",serverConn,&status,sizeof(uint32_t),ntimeout,dp)
+    GETFREE("DPReplyHeader",serverConn,&reply,sizeof(DPREPLYHEADER),ntimeout,dp);
+
+    if(reply.header != SERVER_HEADER) {
+      ::printf("\nUnexpected DP reply header from server\n");
+      isConnected = false;
+      close_socket(serverConn);
+      free(dp);
+      return false;
+    }
+
+    if(reply.nbReset > 0) {
+      uint32_t *resetIdx = (uint32_t *)malloc(sizeof(uint32_t) * reply.nbReset);
+      if( (nbRead = Read(serverConn,(char *)resetIdx,sizeof(uint32_t) * reply.nbReset,ntimeout)) < 0 ) {
+        ::printf("\nReadError(DPReset): %s\n",lastError.c_str());
+        isConnected = false;
+        free(resetIdx);
+        free(dp);
+        close_socket(serverConn);
+        return false;
+      }
+      if(deadWalkers)
+        deadWalkers->assign(resetIdx,resetIdx + reply.nbReset);
+      free(resetIdx);
+    }
+
+    switch(reply.status) {
+    case SERVER_OK:
+      serverStatus = "OK";
+      break;
+    case SERVER_END:
+      serverStatus = "END";
+      endOfSearch = true;
+      break;
+    case SERVER_BACKUP:
+      serverStatus = "Backup";
+      break;
+    default:
+      serverStatus = "Fault";
+      break;
+    }
 
     dps.clear();
     free(dp);
@@ -1265,10 +1342,11 @@ bool Kangaroo::GetConfigFromServer() {
   GET("KeyY",serverConn,key.y.bits64,32,ntimeout);
   GET("DP",serverConn,&initDPSize,sizeof(int32_t),ntimeout);
 
-  if(version<3) {
+  if(version != SERVER_VERSION) {
     isConnected = false;
     close_socket(serverConn);
-    ::printf("Cannot connect to server: %s\nServer version must be >= 3\n",serverIp.c_str());
+    ::printf("Cannot connect to server: %s\nProtocol version mismatch (server=%u client=%u)\n",
+      serverIp.c_str(),version,(uint32_t)SERVER_VERSION);
     return false;
   }
 
