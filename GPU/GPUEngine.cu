@@ -178,7 +178,22 @@ GPUEngine::GPUEngine(int nbThreadGroup,int nbThreadPerGroup,int gpuId,uint32_t m
 
   // Initialise CUDA
   this->nbThreadPerGroup = nbThreadPerGroup;
+  this->nbThread = 0;
   initialised = false;
+  lostWarning = false;
+  outputSize = 0;
+  kangarooSize = 0;
+  kangarooSizePinned = 0;
+  jumpSize = 0;
+  dpMask = 0;
+  inputKangaroo = NULL;
+  inputKangarooPinned = NULL;
+  outputItem = NULL;
+  outputItemPinned = NULL;
+  jumpPinned = NULL;
+  kernelStartEvent = NULL;
+  kernelStopEvent = NULL;
+  kernelTimingReady = false;
   cudaError_t err;
 
   int deviceCount = 0;
@@ -223,12 +238,16 @@ GPUEngine::GPUEngine(int nbThreadGroup,int nbThreadPerGroup,int gpuId,uint32_t m
     return;
   }
 
-  // Allocate memory
-  inputKangaroo = NULL;
-  inputKangarooPinned = NULL;
-  outputItem = NULL;
-  outputItemPinned = NULL;
-  jumpPinned = NULL;
+  err = cudaEventCreate(&kernelStartEvent);
+  if(err != cudaSuccess) {
+    printf("GPUEngine: Create start event: %s\n",cudaGetErrorString(err));
+    return;
+  }
+  err = cudaEventCreate(&kernelStopEvent);
+  if(err != cudaSuccess) {
+    printf("GPUEngine: Create stop event: %s\n",cudaGetErrorString(err));
+    return;
+  }
 
   // Input kangaroos
   kangarooSize = nbThread * GPU_GRP_SIZE * KSIZE * 8;
@@ -263,8 +282,6 @@ GPUEngine::GPUEngine(int nbThreadGroup,int nbThreadPerGroup,int gpuId,uint32_t m
     printf("GPUEngine: Allocate jump pinned memory: %s\n",cudaGetErrorString(err));
     return;
   }
-
-  lostWarning = false;
   initialised = true;
   wildOffset.SetInt32(0);
 
@@ -287,6 +304,8 @@ GPUEngine::GPUEngine(int nbThreadGroup,int nbThreadPerGroup,int gpuId,uint32_t m
 
 GPUEngine::~GPUEngine() {
 
+  if(kernelStartEvent) cudaEventDestroy(kernelStartEvent);
+  if(kernelStopEvent) cudaEventDestroy(kernelStopEvent);
   if(inputKangaroo) cudaFree(inputKangaroo);
   if(outputItem) cudaFree(outputItem);
   if(inputKangarooPinned) cudaFreeHost(inputKangarooPinned);
@@ -298,6 +317,10 @@ GPUEngine::~GPUEngine() {
 
 int GPUEngine::GetMemory() {
   return kangarooSize + outputSize + jumpSize;
+}
+
+bool GPUEngine::IsInitialized() const {
+  return initialised;
 }
 
 
@@ -575,9 +598,18 @@ bool GPUEngine::callKernel() {
   // Reset nbFound
   cudaMemset(outputItem,0,4);
 
+  if(kernelStartEvent && kernelStopEvent) {
+    cudaEventRecord(kernelStartEvent,0);
+  }
+
   // Call the kernel (Perform STEP_SIZE keys per thread)
   comp_kangaroos << < nbThread / nbThreadPerGroup,nbThreadPerGroup >> >
       (inputKangaroo,maxFound,outputItem,dpMask);
+
+  if(kernelStartEvent && kernelStopEvent) {
+    cudaEventRecord(kernelStopEvent,0);
+    kernelTimingReady = true;
+  }
 
   cudaError_t err = cudaGetLastError();
   if(err != cudaSuccess) {
@@ -637,10 +669,12 @@ bool GPUEngine::callKernelAndWait() {
 
 }
 
-bool GPUEngine::Launch(std::vector<ITEM> &hashFound,bool spinWait) {
+bool GPUEngine::Launch(std::vector<ITEM> &hashFound,bool spinWait,double *kernelElapsedMs) {
 
 
   hashFound.clear();
+  if(kernelElapsedMs)
+    *kernelElapsedMs = 0.0;
 
   // Get the result
 
@@ -667,6 +701,16 @@ bool GPUEngine::Launch(std::vector<ITEM> &hashFound,bool spinWait) {
   if(err != cudaSuccess) {
     printf("GPUEngine: Launch: %s\n",cudaGetErrorString(err));
     return false;
+  }
+
+  if(kernelElapsedMs != NULL && kernelTimingReady) {
+    float elapsedMs = 0.0f;
+    err = cudaEventElapsedTime(&elapsedMs,kernelStartEvent,kernelStopEvent);
+    if(err != cudaSuccess) {
+      printf("GPUEngine: Launch timing: %s\n",cudaGetErrorString(err));
+      return false;
+    }
+    *kernelElapsedMs = (double)elapsedMs;
   }
 
   // Look for prefix found

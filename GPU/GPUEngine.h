@@ -22,6 +22,9 @@
 #include "../Constants.h"
 #include "../SECPK1/SECP256k1.h"
 
+struct CUevent_st;
+typedef struct CUevent_st *cudaEvent_t;
+
 #ifdef USE_SYMMETRY
 #define KSIZE 11
 #else
@@ -57,11 +60,12 @@ public:
   void SetKangaroos(Int *px,Int *py,Int *d);
   void GetKangaroos(Int *px,Int *py,Int *d);
   void SetKangaroo(uint64_t kIdx,Int *px,Int *py,Int *d);
-  bool Launch(std::vector<ITEM> &hashFound,bool spinWait = false);
+  bool Launch(std::vector<ITEM> &hashFound,bool spinWait = false,double *kernelElapsedMs = NULL);
   void SetWildOffset(Int *offset);
   int GetNbThread();
   int GetGroupSize();
   int GetMemory();
+  bool IsInitialized() const;
   bool callKernelAndWait();
   bool callKernel();
 
@@ -93,6 +97,9 @@ private:
   uint32_t kangarooSizePinned;
   uint32_t jumpSize;
   uint64_t dpMask;
+  cudaEvent_t kernelStartEvent;
+  cudaEvent_t kernelStopEvent;
+  bool kernelTimingReady;
 
 };
 

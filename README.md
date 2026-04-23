@@ -98,11 +98,11 @@ ex
 0335BB25364370D4DD14A9FC2B406D398C4B53C85BE58FCC7297BD34004602EBEC
 ```
 
-# Performance Benchmark Contract (planned)
+# Performance Benchmark Contract
 
 The current solver prints live throughput such as `[GPU ... MK/s]` during normal runs. Those numbers are useful operational telemetry, but they are not deterministic enough for branch-to-branch GPU tuning because they include full solver-loop effects such as distinguished-point traffic, host-side polling/wait behavior, copy-back, and startup/runtime noise.
 
-The planned standalone single-GPU performance harness will use this benchmark contract:
+The standalone single-GPU performance harness uses this benchmark contract:
 
 - One benchmark `step` is one kangaroo advance inside the fixed `NB_RUN` GPU inner loop.
 - `kernel_ns_per_step` is the primary optimization metric.
@@ -111,7 +111,28 @@ The planned standalone single-GPU performance harness will use this benchmark co
 - Each benchmark result applies to exactly one GPU and one fixed grid configuration.
 - Branch comparisons will rank results by `kernel_ns_per_step` first, then `steps_per_sec`.
 
-The standalone perf harness is planned, but it is not part of the main solver binary yet.
+## Standalone Performance Harness
+
+`kangaroo-perf` is a separate benchmark binary. It does not change the normal `kangaroo` solver workflow, CLI, or runtime output.
+
+Current support is Makefile-only:
+
+```bash
+make perf gpu=1 ccap=61
+```
+
+The harness uses one embedded benchmark profile and is intended for single-GPU branch-to-branch comparisons.
+If neither `--iterations` nor `--seconds` is specified, it defaults to `50` measured launches.
+
+Examples:
+
+```bash
+./kangaroo-perf --gpu-id 0 --iterations 50
+./kangaroo-perf --gpu-id 0 --seconds 5
+./kangaroo-perf --gpu-id 0 --grid 4,96 --warmup 2 --iterations 10 --json-out perf.json
+```
+
+The JSON output includes launch counts, grid size, kernel timing, `kernel_ns_per_step`, `steps_per_sec`, and `legacy_mkeys_per_sec`.
 
 # Note on Time/Memory tradeoff of the DP method
 

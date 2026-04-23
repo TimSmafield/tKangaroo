@@ -20,6 +20,12 @@ OBJET = $(addprefix $(OBJDIR)/, \
       GPU/GPUEngine.o Kangaroo.o HashTable.o Thread.o \
       Backup.o Check.o Network.o Merge.o PartMerge.o)
 
+PERF_OBJET = $(addprefix $(OBJDIR)/, \
+      PerfMain.o PerfHarness.o SECPK1/IntGroup.o SECPK1/Random.o \
+      Timer.o SECPK1/Int.o SECPK1/IntMod.o \
+      SECPK1/Point.o SECPK1/SECP256K1.o \
+      GPU/GPUEngine.o)
+
 else
 
 SRC = SECPK1/IntGroup.cpp main.cpp SECPK1/Random.cpp \
@@ -85,7 +91,17 @@ bsgs: $(OBJET)
 	@echo Making Kangaroo...
 	$(CXX) $(OBJET) $(LFLAGS) -o kangaroo
 
-$(OBJET): | $(OBJDIR) $(OBJDIR)/SECPK1 $(OBJDIR)/GPU
+ifdef gpu
+perf: $(PERF_OBJET)
+	@echo Making kangaroo-perf...
+	$(CXX) $(PERF_OBJET) $(LFLAGS) -o kangaroo-perf
+else
+perf:
+	@echo perf target requires gpu=1
+	@false
+endif
+
+$(OBJET) $(PERF_OBJET): | $(OBJDIR) $(OBJDIR)/SECPK1 $(OBJDIR)/GPU
 
 $(OBJDIR):
 	mkdir -p $(OBJDIR)
