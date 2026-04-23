@@ -134,6 +134,29 @@ Examples:
 
 The JSON output includes launch counts, grid size, kernel timing, `kernel_ns_per_step`, `steps_per_sec`, and `legacy_mkeys_per_sec`.
 
+## Docker Image
+
+The repo now ships a root `Dockerfile` that builds from the current local checkout and installs both `/usr/local/bin/kangaroo` and `/usr/local/bin/kangaroo-perf` in the runtime image. The container entrypoint remains `kangaroo`, so the normal solver workflow is unchanged.
+
+Build the image from the repo root:
+
+```bash
+docker build --no-cache --build-arg CCAP=61 --build-arg BRANCH=testHarness -t kangaroo:testHarness .
+```
+
+The `BRANCH` build argument is still accepted so older commands continue to work, but it is now informational only. The image no longer clones a remote branch during the build.
+
+Examples:
+
+```bash
+docker run --rm --gpus all kangaroo:testHarness -l
+docker run --rm --gpus all -v C:\psi\docker\kangroo:/work kangaroo:testHarness -gpu -t 8 -o /work/run.out /work/test.conf
+docker run --rm --gpus all --entrypoint /usr/local/bin/kangaroo-perf kangaroo:testHarness --gpu-id 0 --iterations 50
+docker run --rm --gpus all -v C:\psi\docker\kangroo:/work --entrypoint /usr/local/bin/kangaroo-perf kangaroo:testHarness --gpu-id 0 --grid 4,96 --warmup 2 --iterations 10 --json-out /work/perf.json
+```
+
+Related container examples now live under `docker/`, including the sample config at `docker/test.conf`.
+
 # Note on Time/Memory tradeoff of the DP method
 
 The distinguished point (DP) method is an efficient method for storing random walks and detect collision between them. Instead of storing all points of all kangagroo's random walks, we store only points that have an x value starting with dpBit zero bits. When 2 kangaroos collide, they will then follow the same path because their jumps are a function of their x values. The collision will be then detected when the 2 kangaroos reach a distinguished point.\

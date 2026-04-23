@@ -1,0 +1,15 @@
+docker system prune -a --volumes
+
+docker build --no-cache --build-arg CCAP=61 --build-arg BRANCH=testHarness -t kangaroo:testHarness .
+
+docker run --rm --gpus all kangaroo:testHarness -l
+
+docker run --rm --gpus all -v C:\psi\docker\kangroo:/work kangaroo:testHarness -gpu -t 8 -m 14 -o /work/run.out /work/test.conf
+
+docker run --stop-timeout 900 --rm -it --gpus all -v C:\psi\docker\kangroo:/work kangaroo:testHarness -o /work/run.out -i /work/save.work -ws -w /work/save.work -wi 2400 -gpu -t 8
+
+docker run --rm --gpus all --entrypoint /usr/local/bin/kangaroo-perf kangaroo:testHarness --help
+
+docker run --rm --gpus all --entrypoint /usr/local/bin/kangaroo-perf kangaroo:testHarness --gpu-id 0 --iterations 50
+
+docker run --rm --gpus all -v C:\psi\docker\kangroo:/work --entrypoint /usr/local/bin/kangaroo-perf kangaroo:testHarness --gpu-id 0 --grid 4,96 --warmup 2 --iterations 10 --json-out /work/perf.json

@@ -1,0 +1,12 @@
+.git
+.gitignore
+.idea
+.vs
+.codex-build
+obj
+x64
+cmake-build-debug
+ROADMAP.local.md
+*.prf
+kangaroo
+kangaroo-perf
