@@ -57,6 +57,13 @@ typedef struct {
   double postMs;
 } GPULaunchTimings;
 
+typedef struct {
+  std::string gpuName;
+  int computeCapabilityMajor;
+  int computeCapabilityMinor;
+  uint64_t totalThreads;
+} GPUDeviceMetadata;
+
 class GPUEngine {
 
 public:
@@ -72,6 +79,7 @@ public:
   int GetNbThread();
   int GetGroupSize();
   int GetMemory();
+  GPUDeviceMetadata GetDeviceMetadata() const;
   bool IsInitialized() const;
   bool callKernelAndWait();
   bool callKernel();
@@ -104,6 +112,7 @@ private:
   uint32_t kangarooSizePinned;
   uint32_t jumpSize;
   uint64_t dpMask;
+  GPUDeviceMetadata deviceMetadata;
   cudaEvent_t kernelStartEvent;
   cudaEvent_t kernelStopEvent;
   bool kernelTimingReady;

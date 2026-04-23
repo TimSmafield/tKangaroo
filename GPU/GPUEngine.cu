@@ -191,6 +191,10 @@ GPUEngine::GPUEngine(int nbThreadGroup,int nbThreadPerGroup,int gpuId,uint32_t m
   outputItem = NULL;
   outputItemPinned = NULL;
   jumpPinned = NULL;
+  deviceMetadata.gpuName = "";
+  deviceMetadata.computeCapabilityMajor = 0;
+  deviceMetadata.computeCapabilityMinor = 0;
+  deviceMetadata.totalThreads = 0;
   kernelStartEvent = NULL;
   kernelStopEvent = NULL;
   kernelTimingReady = false;
@@ -222,6 +226,10 @@ GPUEngine::GPUEngine(int nbThreadGroup,int nbThreadPerGroup,int gpuId,uint32_t m
   this->nbThread = nbThreadGroup * nbThreadPerGroup;
   this->maxFound = maxFound;
   this->outputSize = (maxFound*ITEM_SIZE + 4);
+  deviceMetadata.gpuName = std::string(deviceProp.name);
+  deviceMetadata.computeCapabilityMajor = deviceProp.major;
+  deviceMetadata.computeCapabilityMinor = deviceProp.minor;
+  deviceMetadata.totalThreads = (uint64_t)nbThread;
 
   char tmp[512];
   sprintf(tmp,"GPU #%d %s (%dx%d cores) Grid(%dx%d)",
@@ -317,6 +325,10 @@ GPUEngine::~GPUEngine() {
 
 int GPUEngine::GetMemory() {
   return kangarooSize + outputSize + jumpSize;
+}
+
+GPUDeviceMetadata GPUEngine::GetDeviceMetadata() const {
+  return deviceMetadata;
 }
 
 bool GPUEngine::IsInitialized() const {

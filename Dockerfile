@@ -11,13 +11,14 @@ RUN ln -s /usr/local/cuda /usr/local/cuda-8.0 && \
 WORKDIR /opt/Kangaroo
 ARG BRANCH=local
 ARG CCAP=61
+ARG GIT_COMMIT=unknown
 COPY . .
 
 RUN echo "Building local workspace (BRANCH arg kept for CLI compatibility: ${BRANCH})" \
  && make clean || true
 
-RUN make -j"$(nproc)" gpu=1 ccap=${CCAP} all \
- && make -j"$(nproc)" gpu=1 ccap=${CCAP} perf \
+RUN make -j"$(nproc)" gpu=1 ccap=${CCAP} GIT_COMMIT=${GIT_COMMIT} all \
+ && make -j"$(nproc)" gpu=1 ccap=${CCAP} GIT_COMMIT=${GIT_COMMIT} perf \
  && mkdir -p /out \
  && install -m755 ./kangaroo /out/kangaroo \
  && install -m755 ./kangaroo-perf /out/kangaroo-perf

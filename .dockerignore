@@ -10,3 +10,4 @@ ROADMAP.local.md
 *.prf
 kangaroo
 kangaroo-perf
+perf/results.local

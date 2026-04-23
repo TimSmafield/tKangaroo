@@ -42,8 +42,13 @@ struct PerfResult {
   std::string benchmarkProfile;
   int gpuId;
   std::string deviceName;
+  std::string gpuName;
+  int computeCapabilityMajor;
+  int computeCapabilityMinor;
   int gridSizeX;
   int gridSizeY;
+  uint64_t totalThreads;
+  std::string gitCommit;
   uint32_t seed;
   int warmupIterations;
   uint64_t actualWarmupLaunches;
@@ -70,6 +75,7 @@ struct PerfResult {
   double legacyMKeysPerSecond;
   std::string stabilizationMode;
   double warmupKernelFloorMs;
+  std::string jsonOutputPath;
 };
 
 class PerfHarness {
@@ -88,6 +94,7 @@ private:
   void CreateJumpTable();
   void CreateHerd(int nbKangaroo,Int *px,Int *py,Int *distance,int firstType);
   void ResolveGrid(int *gridSizeX,int *gridSizeY);
+  std::string ResolveJsonOutputPath(const PerfResult& result);
   void PrintSummary(const PerfResult& result);
   void WriteJson(const PerfResult& result);
   static std::string JsonEscape(const std::string& value);

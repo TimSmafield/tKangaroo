@@ -124,6 +124,7 @@ make perf gpu=1 ccap=61
 The harness uses one embedded benchmark profile and is intended for single-GPU branch-to-branch comparisons.
 If neither `--iterations` nor `--seconds` is specified, it defaults to `50` measured launches.
 `--warmup` is a minimum warmup launch count, not an exact count. `kangaroo-perf` always discards at least the requested number of launches and at least `1000.0` ms of kernel time before measured results begin, so the actual discarded launch count may be higher on slower grids.
+Each `kangaroo-perf` run now writes exactly one JSON result. If `--json-out` is not provided, the harness auto-saves under `perf/results.local/`. If `--json-out` is provided, that explicit path is used instead.
 
 The primary comparison metrics remain `kernel_ns_per_step` first and `steps_per_sec` second. The harness also reports secondary timing breakdowns for:
 
@@ -132,6 +133,7 @@ The primary comparison metrics remain `kernel_ns_per_step` first and `steps_per_
 - `wait_ms`: async poll/wait time before result handling
 - `copy_ms`: full device-to-host result copy time
 - `post_ms`: host-side decoding of returned items
+- `gpu_name`, `compute_capability_major`, `compute_capability_minor`, `total_threads`, and `git_commit` for machine-readable comparison metadata
 
 Examples:
 
@@ -141,7 +143,7 @@ Examples:
 ./kangaroo-perf --gpu-id 0 --grid 4,96 --warmup 2 --iterations 10 --json-out perf.json
 ```
 
-The JSON output preserves the original launch and throughput fields and now also includes `actual_warmup_launches`, `warmup_kernel_elapsed_ms`, `setup_ms`, `upload_ms`, `total_*` and `avg_*` secondary timings for wait/copy/post, plus the warmup stabilization metadata.
+The JSON output preserves the original launch and throughput fields and now also includes `actual_warmup_launches`, `warmup_kernel_elapsed_ms`, `setup_ms`, `upload_ms`, `total_*` and `avg_*` secondary timings for wait/copy/post, plus `gpu_name`, compute capability, `total_threads`, `git_commit`, and the warmup stabilization metadata.
 
 ## Docker Image
 
@@ -150,10 +152,10 @@ The repo now ships a root `Dockerfile` that builds from the current local checko
 Build the image from the repo root:
 
 ```bash
-docker build --no-cache --build-arg CCAP=61 --build-arg BRANCH=testHarness -t kangaroo:testHarness .
+docker build --no-cache --build-arg CCAP=61 --build-arg BRANCH=testHarness --build-arg GIT_COMMIT=$(git rev-parse --short HEAD) -t kangaroo:testHarness .
 ```
 
-The `BRANCH` build argument is still accepted so older commands continue to work, but it is now informational only. The image no longer clones a remote branch during the build.
+The `BRANCH` build argument is still accepted so older commands continue to work, but it is now informational only. The image no longer clones a remote branch during the build. Because `.git` is excluded from the Docker build context, pass `GIT_COMMIT` explicitly if you want containerized benchmark JSON to include the current short commit hash instead of `unknown`.
 
 Examples:
 

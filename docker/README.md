@@ -9,7 +9,7 @@ This directory holds repo-local Docker examples and sample inputs.
 Typical build:
 
 ```bash
-docker build --no-cache --build-arg CCAP=61 --build-arg BRANCH=testHarness -t kangaroo:testHarness .
+docker build --no-cache --build-arg CCAP=61 --build-arg BRANCH=testHarness --build-arg GIT_COMMIT=$(git rev-parse --short HEAD) -t kangaroo:testHarness .
 ```
 
-The `BRANCH` build argument is retained for command-line compatibility, but the image is built from the current local checkout rather than cloning a remote branch.
+The `BRANCH` build argument is retained for command-line compatibility, but the image is built from the current local checkout rather than cloning a remote branch. Because the Docker build context excludes `.git`, pass `GIT_COMMIT` explicitly if you want containerized benchmark JSON to carry the current short commit hash.

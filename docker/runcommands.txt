@@ -1,6 +1,6 @@
 docker system prune -a --volumes
 
-docker build --no-cache --build-arg CCAP=61 --build-arg BRANCH=testHarness -t kangaroo:testHarness .
+docker build --no-cache --build-arg CCAP=61 --build-arg BRANCH=testHarness --build-arg GIT_COMMIT=$(git rev-parse --short HEAD) -t kangaroo:testHarness .
 
 docker run --rm --gpus all kangaroo:testHarness -l
 

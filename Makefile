@@ -49,6 +49,8 @@ CXX        = g++
 CUDA       = /usr/local/cuda-8.0
 CXXCUDA    = /usr/bin/g++-4.8
 NVCC       = $(CUDA)/bin/nvcc
+GIT_COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
+PERF_CXXFLAGS = $(CXXFLAGS) -DPERF_GIT_COMMIT=\"$(GIT_COMMIT)\"
 
 ifdef gpu
 
@@ -84,6 +86,12 @@ endif
 
 $(OBJDIR)/%.o : %.cpp
 	$(CXX) $(CXXFLAGS) -o $@ -c $<
+
+$(OBJDIR)/PerfMain.o: PerfMain.cpp
+	$(CXX) $(PERF_CXXFLAGS) -o $@ -c $<
+
+$(OBJDIR)/PerfHarness.o: PerfHarness.cpp
+	$(CXX) $(PERF_CXXFLAGS) -o $@ -c $<
 
 all: bsgs
 

@@ -2,13 +2,23 @@
 #include "SECPK1/Random.h"
 #include "Timer.h"
 #include <cuda_runtime.h>
+#include <errno.h>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <math.h>
 #include <stdio.h>
 #include <sstream>
+#include <sys/stat.h>
 #include <vector>
+
+#ifdef WIN64
+#include <direct.h>
+#endif
+
+#ifndef PERF_GIT_COMMIT
+#define PERF_GIT_COMMIT "unknown"
+#endif
 
 using namespace std;
 
@@ -22,8 +32,40 @@ const char *kBenchmarkPublicKey = "03f7aef8a7e38440238f9332906e48f6fd5adbd02d56b
 const char *kTimingSource = "cuda_events";
 const char *kDpMode = "suppressed_max_mask";
 const char *kStabilizationMode = "min_launches_plus_kernel_floor";
+const char *kDefaultResultDir = "perf/results.local";
+const char *kDefaultGitCommit = PERF_GIT_COMMIT;
 const uint32_t kJumpTableSeed = 0x600DCAFEU;
 const double kWarmupKernelFloorMs = 1000.0;
+
+bool DirectoryExists(const string& path) {
+
+  struct stat info;
+  if(stat(path.c_str(),&info) != 0)
+    return false;
+
+  return (info.st_mode & S_IFDIR) != 0;
+
+}
+
+void EnsureDirectoryExists(const string& path) {
+
+  if(DirectoryExists(path))
+    return;
+
+#ifdef WIN64
+  int rc = _mkdir(path.c_str());
+#else
+  int rc = mkdir(path.c_str(),0755);
+#endif
+  if(rc != 0 && errno != EEXIST) {
+    throw PerfError(PERF_EXIT_JSON_ERROR,string("Failed to create directory: ") + path);
+  }
+
+  if(!DirectoryExists(path)) {
+    throw PerfError(PERF_EXIT_JSON_ERROR,string("Path is not a directory: ") + path);
+  }
+
+}
 
 }
 
@@ -40,7 +82,7 @@ void PerfHarness::PrintUsage() {
   printf(" --warmup <int>: Minimum number of warmup launches to discard, default is 5\n");
   printf(" --iterations <int>: Number of measured launches to run, default is 50 when no run mode is set\n");
   printf(" --seconds <double>: Run measured launches until wall-clock seconds elapse\n");
-  printf(" --json-out <path>: Write JSON benchmark output to path\n");
+  printf(" --json-out <path>: Override the default JSON output path\n");
   printf(" --seed <uint32>: Seed for initial herd generation, default is 0x600DCAFE\n");
   printf(" Benchmark warmup also discards at least %.1f ms of kernel time for stabilization\n",kWarmupKernelFloorMs);
   printf(" --help, -h: Show this help text\n");
@@ -338,12 +380,18 @@ PerfResult PerfHarness::Run() {
   }
 
   PerfResult result;
+  GPUDeviceMetadata deviceMetadata = gpu.GetDeviceMetadata();
   result.binary = kPerfBinaryName;
   result.benchmarkProfile = kBenchmarkProfileName;
   result.gpuId = options.gpuId;
   result.deviceName = gpu.deviceName;
+  result.gpuName = deviceMetadata.gpuName;
+  result.computeCapabilityMajor = deviceMetadata.computeCapabilityMajor;
+  result.computeCapabilityMinor = deviceMetadata.computeCapabilityMinor;
   result.gridSizeX = gridSizeX;
   result.gridSizeY = gridSizeY;
+  result.totalThreads = deviceMetadata.totalThreads;
+  result.gitCommit = string(kDefaultGitCommit);
   result.seed = options.seed;
   result.warmupIterations = options.warmupIterations;
   result.actualWarmupLaunches = actualWarmupLaunches;
@@ -372,12 +420,43 @@ PerfResult PerfHarness::Run() {
   result.legacyMKeysPerSecond = metrics.legacyMKeysPerSecond;
   result.stabilizationMode = kStabilizationMode;
   result.warmupKernelFloorMs = kWarmupKernelFloorMs;
+  result.jsonOutputPath = ResolveJsonOutputPath(result);
 
+  WriteJson(result);
   PrintSummary(result);
-  if(options.jsonOutPath.length() > 0)
-    WriteJson(result);
 
   return result;
+
+}
+
+string PerfHarness::ResolveJsonOutputPath(const PerfResult& result) {
+
+  if(options.jsonOutPath.length() > 0)
+    return options.jsonOutPath;
+
+  EnsureDirectoryExists("perf");
+  EnsureDirectoryExists(kDefaultResultDir);
+
+  ostringstream fileName;
+  fileName << kDefaultResultDir
+           << "/"
+           << Timer::getTS()
+           << "_"
+           << result.gitCommit
+           << "_gpu"
+           << result.gpuId
+           << "_cc"
+           << result.computeCapabilityMajor
+           << result.computeCapabilityMinor
+           << "_g"
+           << result.gridSizeX
+           << "x"
+           << result.gridSizeY
+           << "_"
+           << result.runMode
+           << ".json";
+
+  return fileName.str();
 
 }
 
@@ -413,13 +492,15 @@ void PerfHarness::PrintSummary(const PerfResult& result) {
   cout << "kernel_ns_per_step: " << FormatDouble(result.kernelNsPerStep) << endl;
   cout << "steps_per_sec: " << FormatDouble(result.stepsPerSecond) << endl;
   cout << "legacy_mkeys_per_sec: " << FormatDouble(result.legacyMKeysPerSecond) << endl;
+  cout << "Git commit: " << result.gitCommit << endl;
   cout << "Timing source: " << kTimingSource << endl;
+  cout << "JSON output: " << result.jsonOutputPath << endl;
 
 }
 
 void PerfHarness::WriteJson(const PerfResult& result) {
 
-  ofstream out(options.jsonOutPath.c_str(),ios::out | ios::trunc);
+  ofstream out(result.jsonOutputPath.c_str(),ios::out | ios::trunc);
   if(!out.is_open()) {
     throw PerfError(PERF_EXIT_JSON_ERROR,"Failed to open JSON output path");
   }
@@ -429,8 +510,13 @@ void PerfHarness::WriteJson(const PerfResult& result) {
   out << "  \"benchmark_profile\": \"" << JsonEscape(result.benchmarkProfile) << "\",\n";
   out << "  \"gpu_id\": " << result.gpuId << ",\n";
   out << "  \"device_name\": \"" << JsonEscape(result.deviceName) << "\",\n";
+  out << "  \"gpu_name\": \"" << JsonEscape(result.gpuName) << "\",\n";
+  out << "  \"compute_capability_major\": " << result.computeCapabilityMajor << ",\n";
+  out << "  \"compute_capability_minor\": " << result.computeCapabilityMinor << ",\n";
   out << "  \"grid_x\": " << result.gridSizeX << ",\n";
   out << "  \"grid_y\": " << result.gridSizeY << ",\n";
+  out << "  \"total_threads\": " << result.totalThreads << ",\n";
+  out << "  \"git_commit\": \"" << JsonEscape(result.gitCommit) << "\",\n";
   out << "  \"seed\": " << result.seed << ",\n";
   out << "  \"warmup_iterations\": " << result.warmupIterations << ",\n";
   out << "  \"actual_warmup_launches\": " << result.actualWarmupLaunches << ",\n";
