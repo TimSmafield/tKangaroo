@@ -669,23 +669,31 @@ bool GPUEngine::callKernelAndWait() {
 
 }
 
-bool GPUEngine::Launch(std::vector<ITEM> &hashFound,bool spinWait,double *kernelElapsedMs) {
+bool GPUEngine::Launch(std::vector<ITEM> &hashFound,bool spinWait,GPULaunchTimings *launchTimings) {
 
 
   hashFound.clear();
-  if(kernelElapsedMs)
-    *kernelElapsedMs = 0.0;
+  if(launchTimings != NULL) {
+    launchTimings->kernelMs = 0.0;
+    launchTimings->waitMs = 0.0;
+    launchTimings->copyMs = 0.0;
+    launchTimings->postMs = 0.0;
+  }
 
   // Get the result
 
   if(spinWait) {
 
+    double waitStart = Timer::get_tick();
     cudaMemcpy(outputItemPinned,outputItem,outputSize,cudaMemcpyDeviceToHost);
+    if(launchTimings != NULL)
+      launchTimings->waitMs = (Timer::get_tick() - waitStart) * 1000.0;
 
   } else {
 
     // Use cudaMemcpyAsync to avoid default spin wait of cudaMemcpy wich takes 100% CPU
     cudaEvent_t evt;
+    double waitStart = Timer::get_tick();
     cudaEventCreate(&evt);
     cudaMemcpyAsync(outputItemPinned,outputItem,4,cudaMemcpyDeviceToHost,0);
     cudaEventRecord(evt,0);
@@ -694,6 +702,8 @@ bool GPUEngine::Launch(std::vector<ITEM> &hashFound,bool spinWait,double *kernel
       Timer::SleepMillis(1);
     }
     cudaEventDestroy(evt);
+    if(launchTimings != NULL)
+      launchTimings->waitMs = (Timer::get_tick() - waitStart) * 1000.0;
 
   }
 
@@ -703,14 +713,14 @@ bool GPUEngine::Launch(std::vector<ITEM> &hashFound,bool spinWait,double *kernel
     return false;
   }
 
-  if(kernelElapsedMs != NULL && kernelTimingReady) {
+  if(launchTimings != NULL && kernelTimingReady) {
     float elapsedMs = 0.0f;
     err = cudaEventElapsedTime(&elapsedMs,kernelStartEvent,kernelStopEvent);
     if(err != cudaSuccess) {
       printf("GPUEngine: Launch timing: %s\n",cudaGetErrorString(err));
       return false;
     }
-    *kernelElapsedMs = (double)elapsedMs;
+    launchTimings->kernelMs = (double)elapsedMs;
   }
 
   // Look for prefix found
@@ -725,8 +735,12 @@ bool GPUEngine::Launch(std::vector<ITEM> &hashFound,bool spinWait,double *kernel
   }
 
   // When can perform a standard copy, the kernel is eneded
+  double copyStart = Timer::get_tick();
   cudaMemcpy(outputItemPinned,outputItem,nbFound*ITEM_SIZE + 4,cudaMemcpyDeviceToHost);
+  if(launchTimings != NULL)
+    launchTimings->copyMs = (Timer::get_tick() - copyStart) * 1000.0;
 
+  double postStart = Timer::get_tick();
   for(uint32_t i = 0; i < nbFound; i++) {
     uint32_t *itemPtr = outputItemPinned + (i*ITEM_SIZE32 + 1);
     ITEM it;
@@ -750,6 +764,8 @@ bool GPUEngine::Launch(std::vector<ITEM> &hashFound,bool spinWait,double *kernel
 
     hashFound.push_back(it);
   }
+  if(launchTimings != NULL)
+    launchTimings->postMs = (Timer::get_tick() - postStart) * 1000.0;
 
   return callKernel();
 

@@ -50,6 +50,13 @@ typedef struct {
   double legacyMKeysPerSecond;
 } GPUBenchmarkMetrics;
 
+typedef struct {
+  double kernelMs;
+  double waitMs;
+  double copyMs;
+  double postMs;
+} GPULaunchTimings;
+
 class GPUEngine {
 
 public:
@@ -60,7 +67,7 @@ public:
   void SetKangaroos(Int *px,Int *py,Int *d);
   void GetKangaroos(Int *px,Int *py,Int *d);
   void SetKangaroo(uint64_t kIdx,Int *px,Int *py,Int *d);
-  bool Launch(std::vector<ITEM> &hashFound,bool spinWait = false,double *kernelElapsedMs = NULL);
+  bool Launch(std::vector<ITEM> &hashFound,bool spinWait = false,GPULaunchTimings *launchTimings = NULL);
   void SetWildOffset(Int *offset);
   int GetNbThread();
   int GetGroupSize();

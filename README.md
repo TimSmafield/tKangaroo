@@ -123,6 +123,15 @@ make perf gpu=1 ccap=61
 
 The harness uses one embedded benchmark profile and is intended for single-GPU branch-to-branch comparisons.
 If neither `--iterations` nor `--seconds` is specified, it defaults to `50` measured launches.
+`--warmup` is a minimum warmup launch count, not an exact count. `kangaroo-perf` always discards at least the requested number of launches and at least `1000.0` ms of kernel time before measured results begin, so the actual discarded launch count may be higher on slower grids.
+
+The primary comparison metrics remain `kernel_ns_per_step` first and `steps_per_sec` second. The harness also reports secondary timing breakdowns for:
+
+- `setup_ms`: profile load, setup, herd generation, and engine construction
+- `upload_ms`: parameter and kangaroo upload before the benchmark loop
+- `wait_ms`: async poll/wait time before result handling
+- `copy_ms`: full device-to-host result copy time
+- `post_ms`: host-side decoding of returned items
 
 Examples:
 
@@ -132,7 +141,7 @@ Examples:
 ./kangaroo-perf --gpu-id 0 --grid 4,96 --warmup 2 --iterations 10 --json-out perf.json
 ```
 
-The JSON output includes launch counts, grid size, kernel timing, `kernel_ns_per_step`, `steps_per_sec`, and `legacy_mkeys_per_sec`.
+The JSON output preserves the original launch and throughput fields and now also includes `actual_warmup_launches`, `warmup_kernel_elapsed_ms`, `setup_ms`, `upload_ms`, `total_*` and `avg_*` secondary timings for wait/copy/post, plus the warmup stabilization metadata.
 
 ## Docker Image
 

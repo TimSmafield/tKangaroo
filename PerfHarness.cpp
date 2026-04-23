@@ -21,7 +21,9 @@ const char *kBenchmarkRangeEnd = "0000004000000000000000000000000000000000000000
 const char *kBenchmarkPublicKey = "03f7aef8a7e38440238f9332906e48f6fd5adbd02d56b76a5ffa5aca58c56c3943";
 const char *kTimingSource = "cuda_events";
 const char *kDpMode = "suppressed_max_mask";
+const char *kStabilizationMode = "min_launches_plus_kernel_floor";
 const uint32_t kJumpTableSeed = 0x600DCAFEU;
+const double kWarmupKernelFloorMs = 1000.0;
 
 }
 
@@ -35,11 +37,12 @@ void PerfHarness::PrintUsage() {
   printf("              [--help|-h]\n");
   printf(" --gpu-id <int>: GPU id to benchmark, default is 0\n");
   printf(" --grid <X,Y>: Fixed grid to benchmark, default is the solver auto grid\n");
-  printf(" --warmup <int>: Number of warmup launches to discard, default is 5\n");
+  printf(" --warmup <int>: Minimum number of warmup launches to discard, default is 5\n");
   printf(" --iterations <int>: Number of measured launches to run, default is 50 when no run mode is set\n");
   printf(" --seconds <double>: Run measured launches until wall-clock seconds elapse\n");
   printf(" --json-out <path>: Write JSON benchmark output to path\n");
   printf(" --seed <uint32>: Seed for initial herd generation, default is 0x600DCAFE\n");
+  printf(" Benchmark warmup also discards at least %.1f ms of kernel time for stabilization\n",kWarmupKernelFloorMs);
   printf(" --help, -h: Show this help text\n");
 
 }
@@ -240,6 +243,7 @@ void PerfHarness::ResolveGrid(int *gridSizeX,int *gridSizeY) {
 PerfResult PerfHarness::Run() {
 
   Timer::Init();
+  double setupStart = Timer::get_tick();
   secp.Init();
 
   LoadBenchmarkProfile();
@@ -265,48 +269,65 @@ PerfResult PerfHarness::Run() {
   vector<Int> py(walkersPerLaunch);
   vector<Int> distance(walkersPerLaunch);
   vector<ITEM> found;
+  found.reserve(1);
 
   for(uint64_t i = 0; i < nbThread; i++) {
     CreateHerd(GPU_GRP_SIZE,&px[i * GPU_GRP_SIZE],&py[i * GPU_GRP_SIZE],&distance[i * GPU_GRP_SIZE],TAME);
   }
+  double setupMs = (Timer::get_tick() - setupStart) * 1000.0;
 
 #ifdef USE_SYMMETRY
   gpu.SetWildOffset(&rangeWidthDiv4);
 #else
   gpu.SetWildOffset(&rangeWidthDiv2);
 #endif
+  double uploadStart = Timer::get_tick();
   gpu.SetParams(UINT64_MAX,jumpDistance,jumpPointx,jumpPointy);
   gpu.SetKangaroos(&px[0],&py[0],&distance[0]);
+  double uploadMs = (Timer::get_tick() - uploadStart) * 1000.0;
 
   if(!gpu.callKernel()) {
     throw PerfError(PERF_EXIT_RUNTIME_ERROR,"Failed to launch initial benchmark kernel");
   }
 
-  double kernelElapsedMs = 0.0;
-  for(int i = 0; i < options.warmupIterations; i++) {
-    if(!gpu.Launch(found,false,&kernelElapsedMs)) {
+  GPULaunchTimings launchTimings;
+  uint64_t actualWarmupLaunches = 0;
+  double warmupKernelElapsedMs = 0.0;
+  while(actualWarmupLaunches < (uint64_t)options.warmupIterations || warmupKernelElapsedMs < kWarmupKernelFloorMs) {
+    if(!gpu.Launch(found,false,&launchTimings)) {
       throw PerfError(PERF_EXIT_RUNTIME_ERROR,"Warmup kernel launch failed");
     }
+    warmupKernelElapsedMs += launchTimings.kernelMs;
+    actualWarmupLaunches++;
   }
 
   uint64_t measuredLaunches = 0;
   double totalKernelElapsedMs = 0.0;
+  double totalWaitMs = 0.0;
+  double totalCopyMs = 0.0;
+  double totalPostMs = 0.0;
 
   if(options.useSeconds) {
     double measureStart = Timer::get_tick();
     while(measuredLaunches == 0 || (Timer::get_tick() - measureStart) < options.requestedSeconds) {
-      if(!gpu.Launch(found,false,&kernelElapsedMs)) {
+      if(!gpu.Launch(found,false,&launchTimings)) {
         throw PerfError(PERF_EXIT_RUNTIME_ERROR,"Measured kernel launch failed");
       }
-      totalKernelElapsedMs += kernelElapsedMs;
+      totalKernelElapsedMs += launchTimings.kernelMs;
+      totalWaitMs += launchTimings.waitMs;
+      totalCopyMs += launchTimings.copyMs;
+      totalPostMs += launchTimings.postMs;
       measuredLaunches++;
     }
   } else {
     for(int i = 0; i < options.requestedIterations; i++) {
-      if(!gpu.Launch(found,false,&kernelElapsedMs)) {
+      if(!gpu.Launch(found,false,&launchTimings)) {
         throw PerfError(PERF_EXIT_RUNTIME_ERROR,"Measured kernel launch failed");
       }
-      totalKernelElapsedMs += kernelElapsedMs;
+      totalKernelElapsedMs += launchTimings.kernelMs;
+      totalWaitMs += launchTimings.waitMs;
+      totalCopyMs += launchTimings.copyMs;
+      totalPostMs += launchTimings.postMs;
       measuredLaunches++;
     }
   }
@@ -325,6 +346,8 @@ PerfResult PerfHarness::Run() {
   result.gridSizeY = gridSizeY;
   result.seed = options.seed;
   result.warmupIterations = options.warmupIterations;
+  result.actualWarmupLaunches = actualWarmupLaunches;
+  result.warmupKernelElapsedMs = warmupKernelElapsedMs;
   result.runMode = options.useSeconds ? "seconds" : "iterations";
   result.requestedIterations = options.useSeconds ? 0 : options.requestedIterations;
   result.requestedSeconds = options.useSeconds ? options.requestedSeconds : 0.0;
@@ -332,13 +355,23 @@ PerfResult PerfHarness::Run() {
   result.walkersPerLaunch = walkersPerLaunch;
   result.stepsPerLaunch = stepsPerLaunch;
   result.totalSteps = stepsPerLaunch * measuredLaunches;
+  result.setupMs = setupMs;
+  result.uploadMs = uploadMs;
   result.totalKernelElapsedMs = totalKernelElapsedMs;
   result.avgKernelElapsedMs = measuredLaunches > 0 ? totalKernelElapsedMs / (double)measuredLaunches : 0.0;
+  result.totalWaitMs = totalWaitMs;
+  result.avgWaitMs = measuredLaunches > 0 ? totalWaitMs / (double)measuredLaunches : 0.0;
+  result.totalCopyMs = totalCopyMs;
+  result.avgCopyMs = measuredLaunches > 0 ? totalCopyMs / (double)measuredLaunches : 0.0;
+  result.totalPostMs = totalPostMs;
+  result.avgPostMs = measuredLaunches > 0 ? totalPostMs / (double)measuredLaunches : 0.0;
 
   GPUBenchmarkMetrics metrics = GPUEngine::ComputeBenchmarkMetrics(gridSizeX,gridSizeY,result.avgKernelElapsedMs);
   result.kernelNsPerStep = metrics.kernelNsPerStep;
   result.stepsPerSecond = metrics.stepsPerSecond;
   result.legacyMKeysPerSecond = metrics.legacyMKeysPerSecond;
+  result.stabilizationMode = kStabilizationMode;
+  result.warmupKernelFloorMs = kWarmupKernelFloorMs;
 
   PrintSummary(result);
   if(options.jsonOutPath.length() > 0)
@@ -359,13 +392,24 @@ void PerfHarness::PrintSummary(const PerfResult& result) {
   cout << "GPU id: " << result.gpuId << endl;
   cout << "Device: " << result.deviceName << endl;
   cout << "Grid: " << result.gridSizeX << "x" << result.gridSizeY << endl;
-  cout << "Warmup launches: " << result.warmupIterations << endl;
+  cout << "Requested warmup launches: " << result.warmupIterations << endl;
+  cout << "Actual warmup launches: " << result.actualWarmupLaunches << endl;
+  cout << "Warmup kernel elapsed ms: " << FormatDouble(result.warmupKernelElapsedMs) << endl;
+  cout << "Warmup stabilization: " << result.stabilizationMode << " (" << FormatDouble(result.warmupKernelFloorMs) << " ms floor)" << endl;
   cout << "Measured launches: " << result.measuredLaunches << endl;
   cout << "Walkers per launch: " << result.walkersPerLaunch << endl;
   cout << "Steps per launch: " << result.stepsPerLaunch << endl;
   cout << "Total steps: " << result.totalSteps << endl;
+  cout << "Setup ms: " << FormatDouble(result.setupMs) << endl;
+  cout << "Upload ms: " << FormatDouble(result.uploadMs) << endl;
   cout << "Total kernel elapsed ms: " << FormatDouble(result.totalKernelElapsedMs) << endl;
   cout << "Average kernel elapsed ms: " << FormatDouble(result.avgKernelElapsedMs) << endl;
+  cout << "Total wait ms: " << FormatDouble(result.totalWaitMs) << endl;
+  cout << "Average wait ms: " << FormatDouble(result.avgWaitMs) << endl;
+  cout << "Total copy ms: " << FormatDouble(result.totalCopyMs) << endl;
+  cout << "Average copy ms: " << FormatDouble(result.avgCopyMs) << endl;
+  cout << "Total post ms: " << FormatDouble(result.totalPostMs) << endl;
+  cout << "Average post ms: " << FormatDouble(result.avgPostMs) << endl;
   cout << "kernel_ns_per_step: " << FormatDouble(result.kernelNsPerStep) << endl;
   cout << "steps_per_sec: " << FormatDouble(result.stepsPerSecond) << endl;
   cout << "legacy_mkeys_per_sec: " << FormatDouble(result.legacyMKeysPerSecond) << endl;
@@ -389,6 +433,10 @@ void PerfHarness::WriteJson(const PerfResult& result) {
   out << "  \"grid_y\": " << result.gridSizeY << ",\n";
   out << "  \"seed\": " << result.seed << ",\n";
   out << "  \"warmup_iterations\": " << result.warmupIterations << ",\n";
+  out << "  \"actual_warmup_launches\": " << result.actualWarmupLaunches << ",\n";
+  out << "  \"warmup_kernel_elapsed_ms\": " << FormatDouble(result.warmupKernelElapsedMs) << ",\n";
+  out << "  \"stabilization_mode\": \"" << JsonEscape(result.stabilizationMode) << "\",\n";
+  out << "  \"warmup_kernel_floor_ms\": " << FormatDouble(result.warmupKernelFloorMs) << ",\n";
   out << "  \"run_mode\": \"" << result.runMode << "\",\n";
   out << "  \"requested_iterations\": " << result.requestedIterations << ",\n";
   out << "  \"requested_seconds\": " << FormatDouble(result.requestedSeconds) << ",\n";
@@ -396,8 +444,16 @@ void PerfHarness::WriteJson(const PerfResult& result) {
   out << "  \"walkers_per_launch\": " << result.walkersPerLaunch << ",\n";
   out << "  \"steps_per_launch\": " << result.stepsPerLaunch << ",\n";
   out << "  \"total_steps\": " << result.totalSteps << ",\n";
+  out << "  \"setup_ms\": " << FormatDouble(result.setupMs) << ",\n";
+  out << "  \"upload_ms\": " << FormatDouble(result.uploadMs) << ",\n";
   out << "  \"total_kernel_elapsed_ms\": " << FormatDouble(result.totalKernelElapsedMs) << ",\n";
   out << "  \"avg_kernel_elapsed_ms\": " << FormatDouble(result.avgKernelElapsedMs) << ",\n";
+  out << "  \"total_wait_ms\": " << FormatDouble(result.totalWaitMs) << ",\n";
+  out << "  \"avg_wait_ms\": " << FormatDouble(result.avgWaitMs) << ",\n";
+  out << "  \"total_copy_ms\": " << FormatDouble(result.totalCopyMs) << ",\n";
+  out << "  \"avg_copy_ms\": " << FormatDouble(result.avgCopyMs) << ",\n";
+  out << "  \"total_post_ms\": " << FormatDouble(result.totalPostMs) << ",\n";
+  out << "  \"avg_post_ms\": " << FormatDouble(result.avgPostMs) << ",\n";
   out << "  \"kernel_ns_per_step\": " << FormatDouble(result.kernelNsPerStep) << ",\n";
   out << "  \"steps_per_sec\": " << FormatDouble(result.stepsPerSecond) << ",\n";
   out << "  \"legacy_mkeys_per_sec\": " << FormatDouble(result.legacyMKeysPerSecond) << ",\n";

@@ -46,6 +46,8 @@ struct PerfResult {
   int gridSizeY;
   uint32_t seed;
   int warmupIterations;
+  uint64_t actualWarmupLaunches;
+  double warmupKernelElapsedMs;
   std::string runMode;
   int requestedIterations;
   double requestedSeconds;
@@ -53,11 +55,21 @@ struct PerfResult {
   uint64_t walkersPerLaunch;
   uint64_t stepsPerLaunch;
   uint64_t totalSteps;
+  double setupMs;
+  double uploadMs;
   double totalKernelElapsedMs;
   double avgKernelElapsedMs;
+  double totalWaitMs;
+  double avgWaitMs;
+  double totalCopyMs;
+  double avgCopyMs;
+  double totalPostMs;
+  double avgPostMs;
   double kernelNsPerStep;
   double stepsPerSecond;
   double legacyMKeysPerSecond;
+  std::string stabilizationMode;
+  double warmupKernelFloorMs;
 };
 
 class PerfHarness {
