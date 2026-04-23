@@ -98,6 +98,21 @@ ex
 0335BB25364370D4DD14A9FC2B406D398C4B53C85BE58FCC7297BD34004602EBEC
 ```
 
+# Performance Benchmark Contract (planned)
+
+The current solver prints live throughput such as `[GPU ... MK/s]` during normal runs. Those numbers are useful operational telemetry, but they are not deterministic enough for branch-to-branch GPU tuning because they include full solver-loop effects such as distinguished-point traffic, host-side polling/wait behavior, copy-back, and startup/runtime noise.
+
+The planned standalone single-GPU performance harness will use this benchmark contract:
+
+- One benchmark `step` is one kangaroo advance inside the fixed `NB_RUN` GPU inner loop.
+- `kernel_ns_per_step` is the primary optimization metric.
+- `steps_per_sec` is the primary throughput metric.
+- `MK/s` remains a secondary compatibility/sanity metric only.
+- Each benchmark result applies to exactly one GPU and one fixed grid configuration.
+- Branch comparisons will rank results by `kernel_ns_per_step` first, then `steps_per_sec`.
+
+The standalone perf harness is planned, but it is not part of the main solver binary yet.
+
 # Note on Time/Memory tradeoff of the DP method
 
 The distinguished point (DP) method is an efficient method for storing random walks and detect collision between them. Instead of storing all points of all kangagroo's random walks, we store only points that have an x value starting with dpBit zero bits. When 2 kangaroos collide, they will then follow the same path because their jumps are a function of their x values. The collision will be then detected when the 2 kangaroos reach a distinguished point.\

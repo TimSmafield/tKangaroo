@@ -37,6 +37,16 @@ typedef struct {
   uint64_t kIdx;
 } ITEM;
 
+// Shared benchmark contract for the future standalone perf harness.
+// These helpers define launch-level step accounting without changing solver behavior.
+typedef struct {
+  uint64_t walkersPerLaunch;
+  uint64_t stepsPerLaunch;
+  double kernelNsPerStep;
+  double stepsPerSecond;
+  double legacyMKeysPerSecond;
+} GPUBenchmarkMetrics;
+
 class GPUEngine {
 
 public:
@@ -60,6 +70,9 @@ public:
   static void *AllocatePinnedMemory(size_t size);
   static void FreePinnedMemory(void *buff);
   static void PrintCudaInfo();
+  static uint64_t GetWalkersPerLaunch(int gridSizeX,int gridSizeY);
+  static uint64_t GetStepsPerLaunch(int gridSizeX,int gridSizeY);
+  static GPUBenchmarkMetrics ComputeBenchmarkMetrics(int gridSizeX,int gridSizeY,double kernelElapsedMs);
   static bool GetGridSize(int gpuId,int *x,int *y);
 
 private:

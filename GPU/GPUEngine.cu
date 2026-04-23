@@ -141,6 +141,39 @@ void GPUEngine::SetWildOffset(Int* offset) {
   wildOffset.Set(offset);
 }
 
+// Benchmark-contract helpers for the future standalone perf harness.
+// They define metric formulas without changing the normal solver path.
+uint64_t GPUEngine::GetWalkersPerLaunch(int gridSizeX,int gridSizeY) {
+
+  if(gridSizeX <= 0 || gridSizeY <= 0)
+    return 0;
+
+  return (uint64_t)GPU_GRP_SIZE * (uint64_t)gridSizeX * (uint64_t)gridSizeY;
+
+}
+
+uint64_t GPUEngine::GetStepsPerLaunch(int gridSizeX,int gridSizeY) {
+  return GetWalkersPerLaunch(gridSizeX,gridSizeY) * (uint64_t)NB_RUN;
+}
+
+GPUBenchmarkMetrics GPUEngine::ComputeBenchmarkMetrics(int gridSizeX,int gridSizeY,double kernelElapsedMs) {
+
+  GPUBenchmarkMetrics metrics = {};
+
+  metrics.walkersPerLaunch = GetWalkersPerLaunch(gridSizeX,gridSizeY);
+  metrics.stepsPerLaunch = GetStepsPerLaunch(gridSizeX,gridSizeY);
+
+  if(metrics.stepsPerLaunch == 0 || kernelElapsedMs <= 0.0)
+    return metrics;
+
+  metrics.kernelNsPerStep = (kernelElapsedMs * 1000000.0) / (double)metrics.stepsPerLaunch;
+  metrics.stepsPerSecond = ((double)metrics.stepsPerLaunch * 1000.0) / kernelElapsedMs;
+  metrics.legacyMKeysPerSecond = metrics.stepsPerSecond / 1000000.0;
+
+  return metrics;
+
+}
+
 GPUEngine::GPUEngine(int nbThreadGroup,int nbThreadPerGroup,int gpuId,uint32_t maxFound) {
 
   // Initialise CUDA
