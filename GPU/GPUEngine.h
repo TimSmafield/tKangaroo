@@ -22,6 +22,9 @@
 #include "../Constants.h"
 #include "../SECPK1/SECP256k1.h"
 
+struct CUevent_st;
+typedef struct CUevent_st *cudaEvent_t;
+
 #ifdef USE_SYMMETRY
 #define KSIZE 11
 #else
@@ -37,6 +40,30 @@ typedef struct {
   uint64_t kIdx;
 } ITEM;
 
+// Shared benchmark contract for the future standalone perf harness.
+// These helpers define launch-level step accounting without changing solver behavior.
+typedef struct {
+  uint64_t walkersPerLaunch;
+  uint64_t stepsPerLaunch;
+  double kernelNsPerStep;
+  double stepsPerSecond;
+  double legacyMKeysPerSecond;
+} GPUBenchmarkMetrics;
+
+typedef struct {
+  double kernelMs;
+  double waitMs;
+  double copyMs;
+  double postMs;
+} GPULaunchTimings;
+
+typedef struct {
+  std::string gpuName;
+  int computeCapabilityMajor;
+  int computeCapabilityMinor;
+  uint64_t totalThreads;
+} GPUDeviceMetadata;
+
 class GPUEngine {
 
 public:
@@ -47,11 +74,13 @@ public:
   void SetKangaroos(Int *px,Int *py,Int *d);
   void GetKangaroos(Int *px,Int *py,Int *d);
   void SetKangaroo(uint64_t kIdx,Int *px,Int *py,Int *d);
-  bool Launch(std::vector<ITEM> &hashFound,bool spinWait = false);
+  bool Launch(std::vector<ITEM> &hashFound,bool spinWait = false,GPULaunchTimings *launchTimings = NULL);
   void SetWildOffset(Int *offset);
   int GetNbThread();
   int GetGroupSize();
   int GetMemory();
+  GPUDeviceMetadata GetDeviceMetadata() const;
+  bool IsInitialized() const;
   bool callKernelAndWait();
   bool callKernel();
 
@@ -60,6 +89,9 @@ public:
   static void *AllocatePinnedMemory(size_t size);
   static void FreePinnedMemory(void *buff);
   static void PrintCudaInfo();
+  static uint64_t GetWalkersPerLaunch(int gridSizeX,int gridSizeY);
+  static uint64_t GetStepsPerLaunch(int gridSizeX,int gridSizeY);
+  static GPUBenchmarkMetrics ComputeBenchmarkMetrics(int gridSizeX,int gridSizeY,double kernelElapsedMs);
   static bool GetGridSize(int gpuId,int *x,int *y);
 
 private:
@@ -80,6 +112,10 @@ private:
   uint32_t kangarooSizePinned;
   uint32_t jumpSize;
   uint64_t dpMask;
+  GPUDeviceMetadata deviceMetadata;
+  cudaEvent_t kernelStartEvent;
+  cudaEvent_t kernelStopEvent;
+  bool kernelTimingReady;
 
 };
 

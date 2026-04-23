@@ -98,6 +98,91 @@ ex
 0335BB25364370D4DD14A9FC2B406D398C4B53C85BE58FCC7297BD34004602EBEC
 ```
 
+# Performance Benchmark Contract
+
+The current solver prints live throughput such as `[GPU ... MK/s]` during normal runs. Those numbers are useful operational telemetry, but they are not deterministic enough for branch-to-branch GPU tuning because they include full solver-loop effects such as distinguished-point traffic, host-side polling/wait behavior, copy-back, and startup/runtime noise.
+
+The standalone single-GPU performance harness uses this benchmark contract:
+
+- One benchmark `step` is one kangaroo advance inside the fixed `NB_RUN` GPU inner loop.
+- `kernel_ns_per_step` is the primary optimization metric.
+- `steps_per_sec` is the primary throughput metric.
+- `MK/s` remains a secondary compatibility/sanity metric only.
+- Each benchmark result applies to exactly one GPU and one fixed grid configuration.
+- Branch comparisons will rank results by `kernel_ns_per_step` first, then `steps_per_sec`.
+
+## Standalone Performance Harness
+
+`kangaroo-perf` is a separate benchmark binary. It does not change the normal `kangaroo` solver workflow, CLI, or runtime output.
+
+Current support is Makefile-only:
+
+```bash
+make perf gpu=1 ccap=61
+```
+
+The harness uses one embedded benchmark profile and is intended for single-GPU branch-to-branch comparisons.
+If neither `--iterations` nor `--seconds` is specified, it defaults to `50` measured launches.
+`--warmup` is a minimum warmup launch count, not an exact count. `kangaroo-perf` always discards at least the requested number of launches and at least `1000.0` ms of kernel time before measured results begin, so the actual discarded launch count may be higher on slower grids.
+Each `kangaroo-perf` run now writes exactly one JSON result. If `--json-out` is not provided, the harness auto-saves under `perf/results.local/`. If `--json-out` is provided, that explicit path is used instead.
+
+The primary comparison metrics remain `kernel_ns_per_step` first and `steps_per_sec` second. The harness also reports secondary timing breakdowns for:
+
+- `setup_ms`: profile load, setup, herd generation, and engine construction
+- `upload_ms`: parameter and kangaroo upload before the benchmark loop
+- `wait_ms`: async poll/wait time before result handling
+- `copy_ms`: full device-to-host result copy time
+- `post_ms`: host-side decoding of returned items
+- `gpu_name`, `compute_capability_major`, `compute_capability_minor`, `total_threads`, and `git_commit` for machine-readable comparison metadata
+
+`kangaroo-perf` also has a built-in one-GPU sweep mode:
+
+- `--grid-sweep auto` benchmarks a deterministic 3x3 band around one center grid.
+- If `--grid` is omitted, the sweep center uses the same auto-grid heuristic as the solver.
+- If `--grid` is provided together with `--grid-sweep auto`, that grid becomes the sweep center.
+- The band step is `max(1, round(center_x * 0.125))` on `x` and `max(32, round_to_nearest_multiple_of_32(center_y * 0.125))` on `y`.
+- Sweep candidates are ranked by `kernel_ns_per_step` ascending, then `steps_per_sec` descending, then `grid_x` ascending, then `grid_y` ascending.
+- Sweep mode writes one summary JSON only. It does not emit per-grid JSON artifacts.
+
+Examples:
+
+```bash
+./kangaroo-perf --gpu-id 0 --iterations 50
+./kangaroo-perf --gpu-id 0 --seconds 5
+./kangaroo-perf --gpu-id 0 --grid 4,96 --warmup 2 --iterations 10 --json-out perf.json
+./kangaroo-perf --gpu-id 0 --grid-sweep auto --warmup 2 --iterations 3
+./kangaroo-perf --gpu-id 0 --grid-sweep auto --grid 18,256 --warmup 2 --iterations 3
+```
+
+Single-grid JSON preserves the original launch and throughput fields and now also includes `actual_warmup_launches`, `warmup_kernel_elapsed_ms`, `setup_ms`, `upload_ms`, `total_*` and `avg_*` secondary timings for wait/copy/post, plus `gpu_name`, compute capability, `total_threads`, `git_commit`, and the warmup stabilization metadata.
+
+Sweep JSON keeps the same full per-grid result shape under `winner` and `candidates`, adds each candidate `rank`, and records the top-level sweep metadata needed for branch-to-branch grid comparisons: center grid, sweep steps, candidate count, and the ranking rule.
+
+## Docker Image
+
+The repo now ships a root `Dockerfile` that builds from the current local checkout and installs both `/usr/local/bin/kangaroo` and `/usr/local/bin/kangaroo-perf` in the runtime image. The container entrypoint remains `kangaroo`, so the normal solver workflow is unchanged.
+
+Build the image from the repo root:
+
+```bash
+docker build --no-cache --build-arg CCAP=61 --build-arg BRANCH=testHarness --build-arg GIT_COMMIT=$(git rev-parse --short HEAD) -t kangaroo:testHarness .
+```
+
+The `BRANCH` build argument is still accepted so older commands continue to work, but it is now informational only. The image no longer clones a remote branch during the build. Because `.git` is excluded from the Docker build context, pass `GIT_COMMIT` explicitly if you want containerized benchmark JSON to include the current short commit hash instead of `unknown`.
+
+Examples:
+
+```bash
+docker run --rm --gpus all kangaroo:testHarness -l
+docker run --rm --gpus all -v C:\psi\docker\kangroo:/work kangaroo:testHarness -gpu -t 8 -o /work/run.out /work/test.conf
+docker run --rm --gpus all --entrypoint /usr/local/bin/kangaroo-perf kangaroo:testHarness --gpu-id 0 --iterations 50
+docker run --rm --gpus all -v C:\psi\docker\kangroo:/work --entrypoint /usr/local/bin/kangaroo-perf kangaroo:testHarness --gpu-id 0 --grid 4,96 --warmup 2 --iterations 10 --json-out /work/perf.json
+docker run --rm --gpus all --entrypoint /usr/local/bin/kangaroo-perf kangaroo:testHarness --gpu-id 0 --grid-sweep auto --warmup 2 --iterations 3
+docker run --rm --gpus all --entrypoint /usr/local/bin/kangaroo-perf kangaroo:testHarness --gpu-id 0 --grid-sweep auto --grid 18,256 --warmup 2 --iterations 3
+```
+
+Related container examples now live under `docker/`, including the sample config at `docker/test.conf`.
+
 # Note on Time/Memory tradeoff of the DP method
 
 The distinguished point (DP) method is an efficient method for storing random walks and detect collision between them. Instead of storing all points of all kangagroo's random walks, we store only points that have an x value starting with dpBit zero bits. When 2 kangaroos collide, they will then follow the same path because their jumps are a function of their x values. The collision will be then detected when the 2 kangaroos reach a distinguished point.\

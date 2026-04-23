@@ -141,11 +141,63 @@ void GPUEngine::SetWildOffset(Int* offset) {
   wildOffset.Set(offset);
 }
 
+// Benchmark-contract helpers for the future standalone perf harness.
+// They define metric formulas without changing the normal solver path.
+uint64_t GPUEngine::GetWalkersPerLaunch(int gridSizeX,int gridSizeY) {
+
+  if(gridSizeX <= 0 || gridSizeY <= 0)
+    return 0;
+
+  return (uint64_t)GPU_GRP_SIZE * (uint64_t)gridSizeX * (uint64_t)gridSizeY;
+
+}
+
+uint64_t GPUEngine::GetStepsPerLaunch(int gridSizeX,int gridSizeY) {
+  return GetWalkersPerLaunch(gridSizeX,gridSizeY) * (uint64_t)NB_RUN;
+}
+
+GPUBenchmarkMetrics GPUEngine::ComputeBenchmarkMetrics(int gridSizeX,int gridSizeY,double kernelElapsedMs) {
+
+  GPUBenchmarkMetrics metrics = {};
+
+  metrics.walkersPerLaunch = GetWalkersPerLaunch(gridSizeX,gridSizeY);
+  metrics.stepsPerLaunch = GetStepsPerLaunch(gridSizeX,gridSizeY);
+
+  if(metrics.stepsPerLaunch == 0 || kernelElapsedMs <= 0.0)
+    return metrics;
+
+  metrics.kernelNsPerStep = (kernelElapsedMs * 1000000.0) / (double)metrics.stepsPerLaunch;
+  metrics.stepsPerSecond = ((double)metrics.stepsPerLaunch * 1000.0) / kernelElapsedMs;
+  metrics.legacyMKeysPerSecond = metrics.stepsPerSecond / 1000000.0;
+
+  return metrics;
+
+}
+
 GPUEngine::GPUEngine(int nbThreadGroup,int nbThreadPerGroup,int gpuId,uint32_t maxFound) {
 
   // Initialise CUDA
   this->nbThreadPerGroup = nbThreadPerGroup;
+  this->nbThread = 0;
   initialised = false;
+  lostWarning = false;
+  outputSize = 0;
+  kangarooSize = 0;
+  kangarooSizePinned = 0;
+  jumpSize = 0;
+  dpMask = 0;
+  inputKangaroo = NULL;
+  inputKangarooPinned = NULL;
+  outputItem = NULL;
+  outputItemPinned = NULL;
+  jumpPinned = NULL;
+  deviceMetadata.gpuName = "";
+  deviceMetadata.computeCapabilityMajor = 0;
+  deviceMetadata.computeCapabilityMinor = 0;
+  deviceMetadata.totalThreads = 0;
+  kernelStartEvent = NULL;
+  kernelStopEvent = NULL;
+  kernelTimingReady = false;
   cudaError_t err;
 
   int deviceCount = 0;
@@ -174,6 +226,10 @@ GPUEngine::GPUEngine(int nbThreadGroup,int nbThreadPerGroup,int gpuId,uint32_t m
   this->nbThread = nbThreadGroup * nbThreadPerGroup;
   this->maxFound = maxFound;
   this->outputSize = (maxFound*ITEM_SIZE + 4);
+  deviceMetadata.gpuName = std::string(deviceProp.name);
+  deviceMetadata.computeCapabilityMajor = deviceProp.major;
+  deviceMetadata.computeCapabilityMinor = deviceProp.minor;
+  deviceMetadata.totalThreads = (uint64_t)nbThread;
 
   char tmp[512];
   sprintf(tmp,"GPU #%d %s (%dx%d cores) Grid(%dx%d)",
@@ -190,12 +246,16 @@ GPUEngine::GPUEngine(int nbThreadGroup,int nbThreadPerGroup,int gpuId,uint32_t m
     return;
   }
 
-  // Allocate memory
-  inputKangaroo = NULL;
-  inputKangarooPinned = NULL;
-  outputItem = NULL;
-  outputItemPinned = NULL;
-  jumpPinned = NULL;
+  err = cudaEventCreate(&kernelStartEvent);
+  if(err != cudaSuccess) {
+    printf("GPUEngine: Create start event: %s\n",cudaGetErrorString(err));
+    return;
+  }
+  err = cudaEventCreate(&kernelStopEvent);
+  if(err != cudaSuccess) {
+    printf("GPUEngine: Create stop event: %s\n",cudaGetErrorString(err));
+    return;
+  }
 
   // Input kangaroos
   kangarooSize = nbThread * GPU_GRP_SIZE * KSIZE * 8;
@@ -230,8 +290,6 @@ GPUEngine::GPUEngine(int nbThreadGroup,int nbThreadPerGroup,int gpuId,uint32_t m
     printf("GPUEngine: Allocate jump pinned memory: %s\n",cudaGetErrorString(err));
     return;
   }
-
-  lostWarning = false;
   initialised = true;
   wildOffset.SetInt32(0);
 
@@ -254,6 +312,8 @@ GPUEngine::GPUEngine(int nbThreadGroup,int nbThreadPerGroup,int gpuId,uint32_t m
 
 GPUEngine::~GPUEngine() {
 
+  if(kernelStartEvent) cudaEventDestroy(kernelStartEvent);
+  if(kernelStopEvent) cudaEventDestroy(kernelStopEvent);
   if(inputKangaroo) cudaFree(inputKangaroo);
   if(outputItem) cudaFree(outputItem);
   if(inputKangarooPinned) cudaFreeHost(inputKangarooPinned);
@@ -265,6 +325,14 @@ GPUEngine::~GPUEngine() {
 
 int GPUEngine::GetMemory() {
   return kangarooSize + outputSize + jumpSize;
+}
+
+GPUDeviceMetadata GPUEngine::GetDeviceMetadata() const {
+  return deviceMetadata;
+}
+
+bool GPUEngine::IsInitialized() const {
+  return initialised;
 }
 
 
@@ -542,9 +610,18 @@ bool GPUEngine::callKernel() {
   // Reset nbFound
   cudaMemset(outputItem,0,4);
 
+  if(kernelStartEvent && kernelStopEvent) {
+    cudaEventRecord(kernelStartEvent,0);
+  }
+
   // Call the kernel (Perform STEP_SIZE keys per thread)
   comp_kangaroos << < nbThread / nbThreadPerGroup,nbThreadPerGroup >> >
       (inputKangaroo,maxFound,outputItem,dpMask);
+
+  if(kernelStartEvent && kernelStopEvent) {
+    cudaEventRecord(kernelStopEvent,0);
+    kernelTimingReady = true;
+  }
 
   cudaError_t err = cudaGetLastError();
   if(err != cudaSuccess) {
@@ -604,21 +681,31 @@ bool GPUEngine::callKernelAndWait() {
 
 }
 
-bool GPUEngine::Launch(std::vector<ITEM> &hashFound,bool spinWait) {
+bool GPUEngine::Launch(std::vector<ITEM> &hashFound,bool spinWait,GPULaunchTimings *launchTimings) {
 
 
   hashFound.clear();
+  if(launchTimings != NULL) {
+    launchTimings->kernelMs = 0.0;
+    launchTimings->waitMs = 0.0;
+    launchTimings->copyMs = 0.0;
+    launchTimings->postMs = 0.0;
+  }
 
   // Get the result
 
   if(spinWait) {
 
+    double waitStart = Timer::get_tick();
     cudaMemcpy(outputItemPinned,outputItem,outputSize,cudaMemcpyDeviceToHost);
+    if(launchTimings != NULL)
+      launchTimings->waitMs = (Timer::get_tick() - waitStart) * 1000.0;
 
   } else {
 
     // Use cudaMemcpyAsync to avoid default spin wait of cudaMemcpy wich takes 100% CPU
     cudaEvent_t evt;
+    double waitStart = Timer::get_tick();
     cudaEventCreate(&evt);
     cudaMemcpyAsync(outputItemPinned,outputItem,4,cudaMemcpyDeviceToHost,0);
     cudaEventRecord(evt,0);
@@ -627,6 +714,8 @@ bool GPUEngine::Launch(std::vector<ITEM> &hashFound,bool spinWait) {
       Timer::SleepMillis(1);
     }
     cudaEventDestroy(evt);
+    if(launchTimings != NULL)
+      launchTimings->waitMs = (Timer::get_tick() - waitStart) * 1000.0;
 
   }
 
@@ -634,6 +723,16 @@ bool GPUEngine::Launch(std::vector<ITEM> &hashFound,bool spinWait) {
   if(err != cudaSuccess) {
     printf("GPUEngine: Launch: %s\n",cudaGetErrorString(err));
     return false;
+  }
+
+  if(launchTimings != NULL && kernelTimingReady) {
+    float elapsedMs = 0.0f;
+    err = cudaEventElapsedTime(&elapsedMs,kernelStartEvent,kernelStopEvent);
+    if(err != cudaSuccess) {
+      printf("GPUEngine: Launch timing: %s\n",cudaGetErrorString(err));
+      return false;
+    }
+    launchTimings->kernelMs = (double)elapsedMs;
   }
 
   // Look for prefix found
@@ -648,8 +747,12 @@ bool GPUEngine::Launch(std::vector<ITEM> &hashFound,bool spinWait) {
   }
 
   // When can perform a standard copy, the kernel is eneded
+  double copyStart = Timer::get_tick();
   cudaMemcpy(outputItemPinned,outputItem,nbFound*ITEM_SIZE + 4,cudaMemcpyDeviceToHost);
+  if(launchTimings != NULL)
+    launchTimings->copyMs = (Timer::get_tick() - copyStart) * 1000.0;
 
+  double postStart = Timer::get_tick();
   for(uint32_t i = 0; i < nbFound; i++) {
     uint32_t *itemPtr = outputItemPinned + (i*ITEM_SIZE32 + 1);
     ITEM it;
@@ -673,6 +776,8 @@ bool GPUEngine::Launch(std::vector<ITEM> &hashFound,bool spinWait) {
 
     hashFound.push_back(it);
   }
+  if(launchTimings != NULL)
+    launchTimings->postMs = (Timer::get_tick() - postStart) * 1000.0;
 
   return callKernel();
 
