@@ -1,6 +1,7 @@
 #include "PerfHarness.h"
 #include "SECPK1/Random.h"
 #include "Timer.h"
+#include <algorithm>
 #include <cuda_runtime.h>
 #include <errno.h>
 #include <fstream>
@@ -32,6 +33,8 @@ const char *kBenchmarkPublicKey = "03f7aef8a7e38440238f9332906e48f6fd5adbd02d56b
 const char *kTimingSource = "cuda_events";
 const char *kDpMode = "suppressed_max_mask";
 const char *kStabilizationMode = "min_launches_plus_kernel_floor";
+const char *kSweepMode = "auto_band";
+const char *kSweepRanking = "kernel_ns_per_step asc, steps_per_sec desc, grid_x asc, grid_y asc";
 const char *kDefaultResultDir = "perf/results.local";
 const char *kDefaultGitCommit = PERF_GIT_COMMIT;
 const uint32_t kJumpTableSeed = 0x600DCAFEU;
@@ -74,11 +77,12 @@ PerfHarness::PerfHarness(const PerfOptions& options) : options(options), rangePo
 
 void PerfHarness::PrintUsage() {
 
-  printf("kangaroo-perf [--gpu-id id] [--grid X,Y] [--warmup n]\n");
+  printf("kangaroo-perf [--gpu-id id] [--grid X,Y] [--grid-sweep auto] [--warmup n]\n");
   printf("              [--iterations n | --seconds s] [--json-out path] [--seed value]\n");
   printf("              [--help|-h]\n");
   printf(" --gpu-id <int>: GPU id to benchmark, default is 0\n");
   printf(" --grid <X,Y>: Fixed grid to benchmark, default is the solver auto grid\n");
+  printf(" --grid-sweep auto: Sweep a deterministic 3x3 grid band around the auto grid or the --grid center\n");
   printf(" --warmup <int>: Minimum number of warmup launches to discard, default is 5\n");
   printf(" --iterations <int>: Number of measured launches to run, default is 50 when no run mode is set\n");
   printf(" --seconds <double>: Run measured launches until wall-clock seconds elapse\n");
@@ -264,6 +268,39 @@ void PerfHarness::CreateHerd(int nbKangaroo,Int *px,Int *py,Int *distance,int fi
 
 }
 
+int PerfHarness::RoundToNearestInt(double value) {
+  return (int)floor(value + 0.5);
+}
+
+int PerfHarness::RoundToNearestMultiple(double value,int multiple) {
+
+  if(multiple <= 0)
+    return RoundToNearestInt(value);
+
+  return RoundToNearestInt(value / (double)multiple) * multiple;
+
+}
+
+vector<int> PerfHarness::BuildSweepAxis(int center,int step) {
+
+  vector<int> axis;
+  axis.push_back(center - step);
+  axis.push_back(center);
+  axis.push_back(center + step);
+
+  vector<int> filtered;
+  filtered.reserve(axis.size());
+  for(size_t i = 0; i < axis.size(); i++) {
+    if(axis[i] > 0)
+      filtered.push_back(axis[i]);
+  }
+
+  sort(filtered.begin(),filtered.end());
+  filtered.erase(unique(filtered.begin(),filtered.end()),filtered.end());
+  return filtered;
+
+}
+
 void PerfHarness::ResolveGrid(int *gridSizeX,int *gridSizeY) {
 
   int defaultGridX = 0;
@@ -282,9 +319,8 @@ void PerfHarness::ResolveGrid(int *gridSizeX,int *gridSizeY) {
 
 }
 
-PerfResult PerfHarness::Run() {
+PerfResult PerfHarness::BenchmarkGrid(int gridSizeX,int gridSizeY) {
 
-  Timer::Init();
   double setupStart = Timer::get_tick();
   secp.Init();
 
@@ -292,10 +328,6 @@ PerfResult PerfHarness::Run() {
   InitRange();
   InitSearchKey();
   CreateJumpTable();
-
-  int gridSizeX = 0;
-  int gridSizeY = 0;
-  ResolveGrid(&gridSizeX,&gridSizeY);
 
   rseed(options.seed);
 
@@ -420,6 +452,94 @@ PerfResult PerfHarness::Run() {
   result.legacyMKeysPerSecond = metrics.legacyMKeysPerSecond;
   result.stabilizationMode = kStabilizationMode;
   result.warmupKernelFloorMs = kWarmupKernelFloorMs;
+  result.jsonOutputPath = "";
+
+  return result;
+
+}
+
+PerfSweepResult PerfHarness::RunSweep(int centerGridX,int centerGridY) {
+
+  int gridStepX = max(1,RoundToNearestInt((double)centerGridX * 0.125));
+  int gridStepY = max(32,RoundToNearestMultiple((double)centerGridY * 0.125,32));
+  vector<int> xAxis = BuildSweepAxis(centerGridX,gridStepX);
+  vector<int> yAxis = BuildSweepAxis(centerGridY,gridStepY);
+  vector<PerfResult> rankedResults;
+
+  for(size_t i = 0; i < xAxis.size(); i++) {
+    for(size_t j = 0; j < yAxis.size(); j++) {
+      rankedResults.push_back(BenchmarkGrid(xAxis[i],yAxis[j]));
+    }
+  }
+
+  if(rankedResults.empty()) {
+    throw PerfError(PERF_EXIT_RUNTIME_ERROR,"No valid sweep candidates generated");
+  }
+
+  sort(rankedResults.begin(),rankedResults.end(),[](const PerfResult& left,const PerfResult& right) {
+    if(left.kernelNsPerStep != right.kernelNsPerStep)
+      return left.kernelNsPerStep < right.kernelNsPerStep;
+    if(left.stepsPerSecond != right.stepsPerSecond)
+      return left.stepsPerSecond > right.stepsPerSecond;
+    if(left.gridSizeX != right.gridSizeX)
+      return left.gridSizeX < right.gridSizeX;
+    return left.gridSizeY < right.gridSizeY;
+  });
+
+  PerfSweepResult result;
+  result.binary = kPerfBinaryName;
+  result.benchmarkProfile = kBenchmarkProfileName;
+  result.gpuId = options.gpuId;
+  result.deviceName = rankedResults[0].deviceName;
+  result.gpuName = rankedResults[0].gpuName;
+  result.computeCapabilityMajor = rankedResults[0].computeCapabilityMajor;
+  result.computeCapabilityMinor = rankedResults[0].computeCapabilityMinor;
+  result.gitCommit = rankedResults[0].gitCommit;
+  result.seed = options.seed;
+  result.runMode = options.useSeconds ? "seconds" : "iterations";
+  result.requestedIterations = options.useSeconds ? 0 : options.requestedIterations;
+  result.requestedSeconds = options.useSeconds ? options.requestedSeconds : 0.0;
+  result.warmupIterations = options.warmupIterations;
+  result.sweepMode = kSweepMode;
+  result.centerGridX = centerGridX;
+  result.centerGridY = centerGridY;
+  result.gridStepX = gridStepX;
+  result.gridStepY = gridStepY;
+  result.candidateCount = (int)rankedResults.size();
+  result.ranking = kSweepRanking;
+  result.winner = rankedResults[0];
+  for(size_t i = 0; i < rankedResults.size(); i++) {
+    PerfSweepCandidate candidate;
+    candidate.rank = (int)i + 1;
+    candidate.result = rankedResults[i];
+    result.candidates.push_back(candidate);
+  }
+  result.jsonOutputPath = ResolveSweepJsonOutputPath(result);
+
+  WriteSweepJson(result);
+  PrintSweepSummary(result);
+
+  return result;
+
+}
+
+PerfResult PerfHarness::Run() {
+
+  Timer::Init();
+
+  if(options.gridSweepAuto) {
+    int centerGridX = 0;
+    int centerGridY = 0;
+    ResolveGrid(&centerGridX,&centerGridY);
+    PerfSweepResult sweepResult = RunSweep(centerGridX,centerGridY);
+    return sweepResult.winner;
+  }
+
+  int gridSizeX = 0;
+  int gridSizeY = 0;
+  ResolveGrid(&gridSizeX,&gridSizeY);
+
+  PerfResult result = BenchmarkGrid(gridSizeX,gridSizeY);
   result.jsonOutputPath = ResolveJsonOutputPath(result);
 
   WriteJson(result);
@@ -455,6 +575,31 @@ string PerfHarness::ResolveJsonOutputPath(const PerfResult& result) {
            << "_"
            << result.runMode
            << ".json";
+
+  return fileName.str();
+
+}
+
+string PerfHarness::ResolveSweepJsonOutputPath(const PerfSweepResult& result) {
+
+  if(options.jsonOutPath.length() > 0)
+    return options.jsonOutPath;
+
+  EnsureDirectoryExists("perf");
+  EnsureDirectoryExists(kDefaultResultDir);
+
+  ostringstream fileName;
+  fileName << kDefaultResultDir
+           << "/"
+           << Timer::getTS()
+           << "_"
+           << result.gitCommit
+           << "_gpu"
+           << result.gpuId
+           << "_cc"
+           << result.computeCapabilityMajor
+           << result.computeCapabilityMinor
+           << "_sweep.json";
 
   return fileName.str();
 
@@ -498,7 +643,61 @@ void PerfHarness::PrintSummary(const PerfResult& result) {
 
 }
 
+void PerfHarness::PrintSweepSummary(const PerfSweepResult& result) {
+
+#ifdef USE_SYMMETRY
+  cout << kPerfBinaryName << " v" << RELEASE << " (with symmetry)" << endl;
+#else
+  cout << kPerfBinaryName << " v" << RELEASE << endl;
+#endif
+  cout << "Profile: " << result.benchmarkProfile << endl;
+  cout << "GPU id: " << result.gpuId << endl;
+  cout << "Device: " << result.deviceName << endl;
+  cout << "Sweep mode: " << result.sweepMode << endl;
+  cout << "Center grid: " << result.centerGridX << "x" << result.centerGridY << endl;
+  cout << "Grid steps: " << result.gridStepX << "x" << result.gridStepY << endl;
+  cout << "Candidate count: " << result.candidateCount << endl;
+  cout << "Ranking: " << result.ranking << endl;
+  cout << "Winner grid: " << result.winner.gridSizeX << "x" << result.winner.gridSizeY << endl;
+  cout << "Winner kernel_ns_per_step: " << FormatDouble(result.winner.kernelNsPerStep) << endl;
+  cout << "Winner steps_per_sec: " << FormatDouble(result.winner.stepsPerSecond) << endl;
+  cout << "Rank  Grid      kernel_ns_per_step  steps_per_sec" << endl;
+  for(size_t i = 0; i < result.candidates.size(); i++) {
+    const PerfSweepCandidate& candidate = result.candidates[i];
+    cout << setw(4) << candidate.rank
+         << "  "
+         << setw(3) << candidate.result.gridSizeX
+         << "x"
+         << left << setw(4) << candidate.result.gridSizeY
+         << right << "  "
+         << setw(18) << FormatDouble(candidate.result.kernelNsPerStep)
+         << "  "
+         << setw(13) << FormatDouble(candidate.result.stepsPerSecond)
+         << endl;
+  }
+  cout << "Git commit: " << result.gitCommit << endl;
+  cout << "Timing source: " << kTimingSource << endl;
+  cout << "JSON output: " << result.jsonOutputPath << endl;
+
+}
+
 void PerfHarness::WriteJson(const PerfResult& result) {
+
+  ofstream out(result.jsonOutputPath.c_str(),ios::out | ios::trunc);
+  if(!out.is_open()) {
+    throw PerfError(PERF_EXIT_JSON_ERROR,"Failed to open JSON output path");
+  }
+
+  WritePerfResultJsonObject(out,result,0);
+  out << "\n";
+
+  if(!out.good()) {
+    throw PerfError(PERF_EXIT_JSON_ERROR,"Failed while writing JSON output");
+  }
+
+}
+
+void PerfHarness::WriteSweepJson(const PerfSweepResult& result) {
 
   ofstream out(result.jsonOutputPath.c_str(),ios::out | ios::trunc);
   if(!out.is_open()) {
@@ -513,42 +712,133 @@ void PerfHarness::WriteJson(const PerfResult& result) {
   out << "  \"gpu_name\": \"" << JsonEscape(result.gpuName) << "\",\n";
   out << "  \"compute_capability_major\": " << result.computeCapabilityMajor << ",\n";
   out << "  \"compute_capability_minor\": " << result.computeCapabilityMinor << ",\n";
-  out << "  \"grid_x\": " << result.gridSizeX << ",\n";
-  out << "  \"grid_y\": " << result.gridSizeY << ",\n";
-  out << "  \"total_threads\": " << result.totalThreads << ",\n";
   out << "  \"git_commit\": \"" << JsonEscape(result.gitCommit) << "\",\n";
   out << "  \"seed\": " << result.seed << ",\n";
-  out << "  \"warmup_iterations\": " << result.warmupIterations << ",\n";
-  out << "  \"actual_warmup_launches\": " << result.actualWarmupLaunches << ",\n";
-  out << "  \"warmup_kernel_elapsed_ms\": " << FormatDouble(result.warmupKernelElapsedMs) << ",\n";
-  out << "  \"stabilization_mode\": \"" << JsonEscape(result.stabilizationMode) << "\",\n";
-  out << "  \"warmup_kernel_floor_ms\": " << FormatDouble(result.warmupKernelFloorMs) << ",\n";
   out << "  \"run_mode\": \"" << result.runMode << "\",\n";
   out << "  \"requested_iterations\": " << result.requestedIterations << ",\n";
   out << "  \"requested_seconds\": " << FormatDouble(result.requestedSeconds) << ",\n";
-  out << "  \"measured_launches\": " << result.measuredLaunches << ",\n";
-  out << "  \"walkers_per_launch\": " << result.walkersPerLaunch << ",\n";
-  out << "  \"steps_per_launch\": " << result.stepsPerLaunch << ",\n";
-  out << "  \"total_steps\": " << result.totalSteps << ",\n";
-  out << "  \"setup_ms\": " << FormatDouble(result.setupMs) << ",\n";
-  out << "  \"upload_ms\": " << FormatDouble(result.uploadMs) << ",\n";
-  out << "  \"total_kernel_elapsed_ms\": " << FormatDouble(result.totalKernelElapsedMs) << ",\n";
-  out << "  \"avg_kernel_elapsed_ms\": " << FormatDouble(result.avgKernelElapsedMs) << ",\n";
-  out << "  \"total_wait_ms\": " << FormatDouble(result.totalWaitMs) << ",\n";
-  out << "  \"avg_wait_ms\": " << FormatDouble(result.avgWaitMs) << ",\n";
-  out << "  \"total_copy_ms\": " << FormatDouble(result.totalCopyMs) << ",\n";
-  out << "  \"avg_copy_ms\": " << FormatDouble(result.avgCopyMs) << ",\n";
-  out << "  \"total_post_ms\": " << FormatDouble(result.totalPostMs) << ",\n";
-  out << "  \"avg_post_ms\": " << FormatDouble(result.avgPostMs) << ",\n";
-  out << "  \"kernel_ns_per_step\": " << FormatDouble(result.kernelNsPerStep) << ",\n";
-  out << "  \"steps_per_sec\": " << FormatDouble(result.stepsPerSecond) << ",\n";
-  out << "  \"legacy_mkeys_per_sec\": " << FormatDouble(result.legacyMKeysPerSecond) << ",\n";
-  out << "  \"timing_source\": \"" << kTimingSource << "\",\n";
-  out << "  \"dp_mode\": \"" << kDpMode << "\"\n";
+  out << "  \"warmup_iterations\": " << result.warmupIterations << ",\n";
+  out << "  \"sweep_mode\": \"" << JsonEscape(result.sweepMode) << "\",\n";
+  out << "  \"center_grid_x\": " << result.centerGridX << ",\n";
+  out << "  \"center_grid_y\": " << result.centerGridY << ",\n";
+  out << "  \"grid_step_x\": " << result.gridStepX << ",\n";
+  out << "  \"grid_step_y\": " << result.gridStepY << ",\n";
+  out << "  \"candidate_count\": " << result.candidateCount << ",\n";
+  out << "  \"ranking\": \"" << JsonEscape(result.ranking) << "\",\n";
+  out << "  \"winner\":\n";
+  WritePerfResultJsonObject(out,result.winner,1);
+  out << ",\n";
+  out << "  \"candidates\": [\n";
+  for(size_t i = 0; i < result.candidates.size(); i++) {
+    WritePerfResultJsonObject(out,result.candidates[i].result,2,true,result.candidates[i].rank);
+    if(i + 1 < result.candidates.size())
+      out << ",";
+    out << "\n";
+  }
+  out << "  ]\n";
   out << "}\n";
 
   if(!out.good()) {
     throw PerfError(PERF_EXIT_JSON_ERROR,"Failed while writing JSON output");
+  }
+
+}
+
+void PerfHarness::WritePerfResultJsonObject(ostream& out,const PerfResult& result,int indentLevel,bool includeRank,int rank) {
+
+  WriteIndent(out,indentLevel);
+  out << "{\n";
+  if(includeRank) {
+    WriteIndent(out,indentLevel + 1);
+    out << "\"rank\": " << rank << ",\n";
+  }
+  WriteIndent(out,indentLevel + 1);
+  out << "\"binary\": \"" << JsonEscape(result.binary) << "\",\n";
+  WriteIndent(out,indentLevel + 1);
+  out << "\"benchmark_profile\": \"" << JsonEscape(result.benchmarkProfile) << "\",\n";
+  WriteIndent(out,indentLevel + 1);
+  out << "\"gpu_id\": " << result.gpuId << ",\n";
+  WriteIndent(out,indentLevel + 1);
+  out << "\"device_name\": \"" << JsonEscape(result.deviceName) << "\",\n";
+  WriteIndent(out,indentLevel + 1);
+  out << "\"gpu_name\": \"" << JsonEscape(result.gpuName) << "\",\n";
+  WriteIndent(out,indentLevel + 1);
+  out << "\"compute_capability_major\": " << result.computeCapabilityMajor << ",\n";
+  WriteIndent(out,indentLevel + 1);
+  out << "\"compute_capability_minor\": " << result.computeCapabilityMinor << ",\n";
+  WriteIndent(out,indentLevel + 1);
+  out << "\"grid_x\": " << result.gridSizeX << ",\n";
+  WriteIndent(out,indentLevel + 1);
+  out << "\"grid_y\": " << result.gridSizeY << ",\n";
+  WriteIndent(out,indentLevel + 1);
+  out << "\"total_threads\": " << result.totalThreads << ",\n";
+  WriteIndent(out,indentLevel + 1);
+  out << "\"git_commit\": \"" << JsonEscape(result.gitCommit) << "\",\n";
+  WriteIndent(out,indentLevel + 1);
+  out << "\"seed\": " << result.seed << ",\n";
+  WriteIndent(out,indentLevel + 1);
+  out << "\"warmup_iterations\": " << result.warmupIterations << ",\n";
+  WriteIndent(out,indentLevel + 1);
+  out << "\"actual_warmup_launches\": " << result.actualWarmupLaunches << ",\n";
+  WriteIndent(out,indentLevel + 1);
+  out << "\"warmup_kernel_elapsed_ms\": " << FormatDouble(result.warmupKernelElapsedMs) << ",\n";
+  WriteIndent(out,indentLevel + 1);
+  out << "\"stabilization_mode\": \"" << JsonEscape(result.stabilizationMode) << "\",\n";
+  WriteIndent(out,indentLevel + 1);
+  out << "\"warmup_kernel_floor_ms\": " << FormatDouble(result.warmupKernelFloorMs) << ",\n";
+  WriteIndent(out,indentLevel + 1);
+  out << "\"run_mode\": \"" << result.runMode << "\",\n";
+  WriteIndent(out,indentLevel + 1);
+  out << "\"requested_iterations\": " << result.requestedIterations << ",\n";
+  WriteIndent(out,indentLevel + 1);
+  out << "\"requested_seconds\": " << FormatDouble(result.requestedSeconds) << ",\n";
+  WriteIndent(out,indentLevel + 1);
+  out << "\"measured_launches\": " << result.measuredLaunches << ",\n";
+  WriteIndent(out,indentLevel + 1);
+  out << "\"walkers_per_launch\": " << result.walkersPerLaunch << ",\n";
+  WriteIndent(out,indentLevel + 1);
+  out << "\"steps_per_launch\": " << result.stepsPerLaunch << ",\n";
+  WriteIndent(out,indentLevel + 1);
+  out << "\"total_steps\": " << result.totalSteps << ",\n";
+  WriteIndent(out,indentLevel + 1);
+  out << "\"setup_ms\": " << FormatDouble(result.setupMs) << ",\n";
+  WriteIndent(out,indentLevel + 1);
+  out << "\"upload_ms\": " << FormatDouble(result.uploadMs) << ",\n";
+  WriteIndent(out,indentLevel + 1);
+  out << "\"total_kernel_elapsed_ms\": " << FormatDouble(result.totalKernelElapsedMs) << ",\n";
+  WriteIndent(out,indentLevel + 1);
+  out << "\"avg_kernel_elapsed_ms\": " << FormatDouble(result.avgKernelElapsedMs) << ",\n";
+  WriteIndent(out,indentLevel + 1);
+  out << "\"total_wait_ms\": " << FormatDouble(result.totalWaitMs) << ",\n";
+  WriteIndent(out,indentLevel + 1);
+  out << "\"avg_wait_ms\": " << FormatDouble(result.avgWaitMs) << ",\n";
+  WriteIndent(out,indentLevel + 1);
+  out << "\"total_copy_ms\": " << FormatDouble(result.totalCopyMs) << ",\n";
+  WriteIndent(out,indentLevel + 1);
+  out << "\"avg_copy_ms\": " << FormatDouble(result.avgCopyMs) << ",\n";
+  WriteIndent(out,indentLevel + 1);
+  out << "\"total_post_ms\": " << FormatDouble(result.totalPostMs) << ",\n";
+  WriteIndent(out,indentLevel + 1);
+  out << "\"avg_post_ms\": " << FormatDouble(result.avgPostMs) << ",\n";
+  WriteIndent(out,indentLevel + 1);
+  out << "\"kernel_ns_per_step\": " << FormatDouble(result.kernelNsPerStep) << ",\n";
+  WriteIndent(out,indentLevel + 1);
+  out << "\"steps_per_sec\": " << FormatDouble(result.stepsPerSecond) << ",\n";
+  WriteIndent(out,indentLevel + 1);
+  out << "\"legacy_mkeys_per_sec\": " << FormatDouble(result.legacyMKeysPerSecond) << ",\n";
+  WriteIndent(out,indentLevel + 1);
+  out << "\"timing_source\": \"" << kTimingSource << "\",\n";
+  WriteIndent(out,indentLevel + 1);
+  out << "\"dp_mode\": \"" << kDpMode << "\"\n";
+  WriteIndent(out,indentLevel);
+  out << "}";
+
+}
+
+void PerfHarness::WriteIndent(ostream& out,int indentLevel) {
+
+  for(int i = 0; i < indentLevel; i++) {
+    out << "  ";
   }
 
 }

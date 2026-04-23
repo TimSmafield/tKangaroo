@@ -135,15 +135,28 @@ The primary comparison metrics remain `kernel_ns_per_step` first and `steps_per_
 - `post_ms`: host-side decoding of returned items
 - `gpu_name`, `compute_capability_major`, `compute_capability_minor`, `total_threads`, and `git_commit` for machine-readable comparison metadata
 
+`kangaroo-perf` also has a built-in one-GPU sweep mode:
+
+- `--grid-sweep auto` benchmarks a deterministic 3x3 band around one center grid.
+- If `--grid` is omitted, the sweep center uses the same auto-grid heuristic as the solver.
+- If `--grid` is provided together with `--grid-sweep auto`, that grid becomes the sweep center.
+- The band step is `max(1, round(center_x * 0.125))` on `x` and `max(32, round_to_nearest_multiple_of_32(center_y * 0.125))` on `y`.
+- Sweep candidates are ranked by `kernel_ns_per_step` ascending, then `steps_per_sec` descending, then `grid_x` ascending, then `grid_y` ascending.
+- Sweep mode writes one summary JSON only. It does not emit per-grid JSON artifacts.
+
 Examples:
 
 ```bash
 ./kangaroo-perf --gpu-id 0 --iterations 50
 ./kangaroo-perf --gpu-id 0 --seconds 5
 ./kangaroo-perf --gpu-id 0 --grid 4,96 --warmup 2 --iterations 10 --json-out perf.json
+./kangaroo-perf --gpu-id 0 --grid-sweep auto --warmup 2 --iterations 3
+./kangaroo-perf --gpu-id 0 --grid-sweep auto --grid 18,256 --warmup 2 --iterations 3
 ```
 
-The JSON output preserves the original launch and throughput fields and now also includes `actual_warmup_launches`, `warmup_kernel_elapsed_ms`, `setup_ms`, `upload_ms`, `total_*` and `avg_*` secondary timings for wait/copy/post, plus `gpu_name`, compute capability, `total_threads`, `git_commit`, and the warmup stabilization metadata.
+Single-grid JSON preserves the original launch and throughput fields and now also includes `actual_warmup_launches`, `warmup_kernel_elapsed_ms`, `setup_ms`, `upload_ms`, `total_*` and `avg_*` secondary timings for wait/copy/post, plus `gpu_name`, compute capability, `total_threads`, `git_commit`, and the warmup stabilization metadata.
+
+Sweep JSON keeps the same full per-grid result shape under `winner` and `candidates`, adds each candidate `rank`, and records the top-level sweep metadata needed for branch-to-branch grid comparisons: center grid, sweep steps, candidate count, and the ranking rule.
 
 ## Docker Image
 
@@ -164,6 +177,8 @@ docker run --rm --gpus all kangaroo:testHarness -l
 docker run --rm --gpus all -v C:\psi\docker\kangroo:/work kangaroo:testHarness -gpu -t 8 -o /work/run.out /work/test.conf
 docker run --rm --gpus all --entrypoint /usr/local/bin/kangaroo-perf kangaroo:testHarness --gpu-id 0 --iterations 50
 docker run --rm --gpus all -v C:\psi\docker\kangroo:/work --entrypoint /usr/local/bin/kangaroo-perf kangaroo:testHarness --gpu-id 0 --grid 4,96 --warmup 2 --iterations 10 --json-out /work/perf.json
+docker run --rm --gpus all --entrypoint /usr/local/bin/kangaroo-perf kangaroo:testHarness --gpu-id 0 --grid-sweep auto --warmup 2 --iterations 3
+docker run --rm --gpus all --entrypoint /usr/local/bin/kangaroo-perf kangaroo:testHarness --gpu-id 0 --grid-sweep auto --grid 18,256 --warmup 2 --iterations 3
 ```
 
 Related container examples now live under `docker/`, including the sample config at `docker/test.conf`.

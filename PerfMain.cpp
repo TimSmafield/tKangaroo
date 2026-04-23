@@ -69,6 +69,7 @@ int main(int argc,char *argv[]) {
     options.gridSizeX = 0;
     options.gridSizeY = 0;
     options.gridSpecified = false;
+    options.gridSweepAuto = false;
     options.warmupIterations = 5;
     options.requestedIterations = 50;
     options.requestedSeconds = 0.0;
@@ -92,6 +93,13 @@ int main(int argc,char *argv[]) {
         i++;
         ParseGrid(argv[i],&options.gridSizeX,&options.gridSizeY);
         options.gridSpecified = true;
+      } else if(strcmp(argv[i],"--grid-sweep") == 0) {
+        if(i >= argc - 1)
+          throw PerfError(PERF_EXIT_INVALID_INPUT,"--grid-sweep requires a value");
+        i++;
+        if(strcmp(argv[i],"auto") != 0)
+          throw PerfError(PERF_EXIT_INVALID_INPUT,"Unsupported --grid-sweep value, expected auto");
+        options.gridSweepAuto = true;
       } else if(strcmp(argv[i],"--warmup") == 0) {
         if(i >= argc - 1)
           throw PerfError(PERF_EXIT_INVALID_INPUT,"--warmup requires a value");
