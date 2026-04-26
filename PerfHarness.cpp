@@ -145,11 +145,6 @@ void PerfHarness::CreateJumpTable() {
 #endif
 
   if(jumpBit > 128) jumpBit = 128;
-  int maxRetry = 100;
-  bool ok = false;
-  double distAvg = 0.0;
-  double maxAvg = pow(2.0,(double)jumpBit - 0.95);
-  double minAvg = pow(2.0,(double)jumpBit - 1.05);
 
   rseed(kJumpTableSeed);
 
@@ -175,40 +170,55 @@ void PerfHarness::CreateJumpTable() {
   Int::SetupField(&old);
 #endif
 
-  while(!ok && maxRetry > 0) {
-    Int totalDist;
-    totalDist.SetInt32(0);
+  Int totalDist;
+  totalDist.SetInt32(0);
 #ifdef USE_SYMMETRY
-    for(int i = 0; i < NB_JUMP / 2; ++i) {
-      jumpDistance[i].Rand(jumpBit / 2);
+  for(int i = 0; i < NB_JUMP / 2; ++i) {
+      int pow2 = (i * jumpBit) / (NB_JUMP / 2);
+      if(pow2 > jumpBit - 1)
+        pow2 = jumpBit - 1;
+      jumpDistance[i].SetInt32(1);
+      jumpDistance[i].ShiftL(pow2);
+      Int variation;
+      variation.Rand(3);
+      variation.AddOne();
+      jumpDistance[i].Mult(&variation);
       jumpDistance[i].Mult(&u);
       if(jumpDistance[i].IsZero())
         jumpDistance[i].SetInt32(1);
       totalDist.Add(&jumpDistance[i]);
-    }
-    for(int i = NB_JUMP / 2; i < NB_JUMP; ++i) {
-      jumpDistance[i].Rand(jumpBit / 2);
+  }
+  for(int i = NB_JUMP / 2; i < NB_JUMP; ++i) {
+      int pow2 = ((i - NB_JUMP / 2) * jumpBit) / (NB_JUMP / 2);
+      if(pow2 > jumpBit - 1)
+        pow2 = jumpBit - 1;
+      jumpDistance[i].SetInt32(1);
+      jumpDistance[i].ShiftL(pow2);
+      Int variation;
+      variation.Rand(3);
+      variation.AddOne();
+      jumpDistance[i].Mult(&variation);
       jumpDistance[i].Mult(&v);
       if(jumpDistance[i].IsZero())
         jumpDistance[i].SetInt32(1);
       totalDist.Add(&jumpDistance[i]);
-    }
+  }
 #else
-    for(int i = 0; i < NB_JUMP; ++i) {
-      jumpDistance[i].Rand(jumpBit);
+  for(int i = 0; i < NB_JUMP; ++i) {
+      int pow2 = (i * jumpBit) / NB_JUMP;
+      if(pow2 > jumpBit)
+        pow2 = jumpBit;
+      jumpDistance[i].SetInt32(1);
+      jumpDistance[i].ShiftL(pow2);
+      Int multiplier;
+      multiplier.Rand(3);
+      multiplier.AddOne();
+      jumpDistance[i].Mult(&multiplier);
       if(jumpDistance[i].IsZero())
         jumpDistance[i].SetInt32(1);
       totalDist.Add(&jumpDistance[i]);
-    }
+  }
 #endif
-    distAvg = totalDist.ToDouble() / (double)NB_JUMP;
-    ok = distAvg > minAvg && distAvg < maxAvg;
-    maxRetry--;
-  }
-
-  if(!ok) {
-    throw PerfError(PERF_EXIT_RUNTIME_ERROR,"Failed to generate benchmark jump table");
-  }
 
   for(int i = 0; i < NB_JUMP; ++i) {
     Point jumpPoint = secp.ComputePublicKey(&jumpDistance[i]);
