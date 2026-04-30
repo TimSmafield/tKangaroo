@@ -489,7 +489,9 @@ void Kangaroo::Check(std::vector<int> gpuId,std::vector<int> gridSize) {
       return;
     }
 
-    GPUEngine h(x,y,gpuId[0],65536);
+    uint64_t expectedDP = ((uint64_t)x * (uint64_t)y * (uint64_t)GPU_GRP_SIZE * (uint64_t)NB_RUN + 255ULL) / 256ULL;
+    uint32_t maxFound = (uint32_t)min<uint64_t>(1048576ULL,max<uint64_t>(65536ULL,expectedDP * 2ULL));
+    GPUEngine h(x,y,gpuId[0],maxFound);
     ::printf(" done\n");
     ::printf("GPU: %s\n",h.deviceName.c_str());
     ::printf("GPU: %.1f MB\n",h.GetMemory() / 1048576.0);

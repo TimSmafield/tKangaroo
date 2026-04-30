@@ -21,6 +21,10 @@
 #define PERF_GIT_COMMIT "unknown"
 #endif
 
+#ifndef GPU_LAUNCH_BOUNDS_THREADS
+#define GPU_LAUNCH_BOUNDS_THREADS 0
+#endif
+
 using namespace std;
 
 namespace {
@@ -464,6 +468,11 @@ PerfSweepResult PerfHarness::RunSweep(int centerGridX,int centerGridY) {
   int gridStepY = max(32,RoundToNearestMultiple((double)centerGridY * 0.125,32));
   vector<int> xAxis = BuildSweepAxis(centerGridX,gridStepX);
   vector<int> yAxis = BuildSweepAxis(centerGridY,gridStepY);
+#if GPU_LAUNCH_BOUNDS_THREADS > 0
+  yAxis.erase(remove_if(yAxis.begin(),yAxis.end(),[](int value) {
+    return value > GPU_LAUNCH_BOUNDS_THREADS;
+  }),yAxis.end());
+#endif
   vector<PerfResult> rankedResults;
 
   for(size_t i = 0; i < xAxis.size(); i++) {

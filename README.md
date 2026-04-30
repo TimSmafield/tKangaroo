@@ -119,7 +119,10 @@ Current support is Makefile-only:
 
 ```bash
 make perf gpu=1 ccap=61
+make perf gpu=1 profile=gtx1060
 ```
+
+The `profile=gtx1060` build profile targets Pascal compute capability 6.1 and applies the GTX 1060 3GB compile-time defaults used by this branch: `GPU_GRP_SIZE=128`, `NB_RUN=64`, `NB_JUMP=32`, and a `256` thread launch-bounds hint sized for the local `18,256` winner grid. These can be overridden for experiments, for example `make perf gpu=1 profile=gtx1060 gpu_grp_size=96 nb_run=96 gpu_launch_bounds=288`.
 
 The harness uses one embedded benchmark profile and is intended for single-GPU branch-to-branch comparisons.
 If neither `--iterations` nor `--seconds` is specified, it defaults to `50` measured launches.
@@ -158,6 +161,38 @@ Single-grid JSON preserves the original launch and throughput fields and now als
 
 Sweep JSON keeps the same full per-grid result shape under `winner` and `candidates`, adds each candidate `rank`, and records the top-level sweep metadata needed for branch-to-branch grid comparisons: center grid, sweep steps, candidate count, and the ranking rule.
 
+## GTX 1060 3GB Profile
+
+This branch includes a targeted GTX 1060 3GB profile for the local Pascal GP106 card (`NVIDIA GeForce GTX 1060 3GB`, compute capability `6.1`). It preserves the normal solver CLI and runtime behavior; the profile only changes compile-time CUDA tuning flags and constants for builds that opt in with `profile=gtx1060` or `PROFILE=gtx1060`.
+
+Build the tuned Docker image from the repo root:
+
+```bash
+docker build --no-cache --build-arg PROFILE=gtx1060 --build-arg CCAP=61 --build-arg GIT_COMMIT=$(git rev-parse --short HEAD) -t kangaroo:gtx1060 .
+```
+
+From Windows Command Prompt, use `for /f` for the Git commit substitution:
+
+```bat
+for /f %i in ('git rev-parse --short HEAD') do docker build --no-cache --build-arg PROFILE=gtx1060 --build-arg CCAP=61 --build-arg GIT_COMMIT=%i -t kangaroo:gtx1060 .
+```
+
+For the current local comparison, the baseline image is `kangaroo:0.8` and the tuned image should be `kangaroo:gtx1060`. Use the same harness command for both images and compare the JSON by `kernel_ns_per_step` first, then `steps_per_sec`:
+
+```bash
+docker run --rm --gpus all --entrypoint /usr/local/bin/kangaroo-perf kangaroo:0.8 --gpu-id 0 --grid-sweep auto --grid 18,256 --warmup 5 --iterations 50
+docker run --rm --gpus all --entrypoint /usr/local/bin/kangaroo-perf kangaroo:gtx1060 --gpu-id 0 --grid-sweep auto --grid 18,256 --warmup 5 --iterations 50
+```
+
+When `GPU_LAUNCH_BOUNDS_THREADS` is set, sweep mode skips block sizes above that compile-time launch bound so profile sweeps do not include invalid candidates.
+
+Sanity checks for the tuned image:
+
+```bash
+docker run --rm --gpus all kangaroo:gtx1060 -l
+docker run --rm --gpus all kangaroo:gtx1060 -gpu -check
+```
+
 ## Docker Image
 
 The repo now ships a root `Dockerfile` that builds from the current local checkout and installs both `/usr/local/bin/kangaroo` and `/usr/local/bin/kangaroo-perf` in the runtime image. The container entrypoint remains `kangaroo`, so the normal solver workflow is unchanged.
@@ -168,7 +203,7 @@ Build the image from the repo root:
 docker build --no-cache --build-arg CCAP=61 --build-arg BRANCH=testHarness --build-arg GIT_COMMIT=$(git rev-parse --short HEAD) -t kangaroo:testHarness .
 ```
 
-The `BRANCH` build argument is still accepted so older commands continue to work, but it is now informational only. The image no longer clones a remote branch during the build. Because `.git` is excluded from the Docker build context, pass `GIT_COMMIT` explicitly if you want containerized benchmark JSON to include the current short commit hash instead of `unknown`.
+The `BRANCH` build argument is still accepted so older commands continue to work, but it is now informational only. The optional `PROFILE` build argument is forwarded to the Makefile; use `PROFILE=gtx1060` for the GTX 1060 3GB tuned build. The image no longer clones a remote branch during the build. Because `.git` is excluded from the Docker build context, pass `GIT_COMMIT` explicitly if you want containerized benchmark JSON to include the current short commit hash instead of `unknown`.
 
 Examples:
 

@@ -32,12 +32,24 @@
 
 // ---------------------------------------------------------------------------------------
 
-__global__ void comp_kangaroos(uint64_t *kangaroos,uint32_t maxFound,uint32_t *found,uint64_t dpMask) {
+#ifndef GPU_LAUNCH_BOUNDS_THREADS
+#define GPU_LAUNCH_BOUNDS_THREADS 0
+#endif
+
+#if GPU_LAUNCH_BOUNDS_THREADS > 0
+#define GPU_KERNEL_LAUNCH_BOUNDS __launch_bounds__(GPU_LAUNCH_BOUNDS_THREADS)
+#else
+#define GPU_KERNEL_LAUNCH_BOUNDS
+#endif
+
+__global__ GPU_KERNEL_LAUNCH_BOUNDS void comp_kangaroos(uint64_t *kangaroos,uint32_t maxFound,uint32_t *found,uint64_t dpMask) {
 
   int xPtr = (blockIdx.x*blockDim.x*GPU_GRP_SIZE) * KSIZE; // x[4] , y[4] , d[2], lastJump
   ComputeKangaroos(kangaroos + xPtr,maxFound,found,dpMask);
 
 }
+
+#undef GPU_KERNEL_LAUNCH_BOUNDS
 
 // ---------------------------------------------------------------------------------------
 //#define GPU_CHECK
