@@ -1,4 +1,4 @@
-# Pollard's kangaroo for SECPK1
+pwd# Pollard's kangaroo for SECPK1
 
 A Pollard's kangaroo interval ECDLP solver for SECP256K1 (based on VanitySearch engine).\
 **This program is limited to a 125bit interval search.**
@@ -160,7 +160,7 @@ Sweep JSON keeps the same full per-grid result shape under `winner` and `candida
 
 ## Docker Image
 
-The repo now ships a root `Dockerfile` that builds from the current local checkout and installs both `/usr/local/bin/kangaroo` and `/usr/local/bin/kangaroo-perf` in the runtime image. The container entrypoint remains `kangaroo`, so the normal solver workflow is unchanged.
+The repo now ships a root `Dockerfile` that builds from the current local checkout and installs both `/usr/local/bin/kangaroo` and `/usr/local/bin/kangaroo-perf` in the runtime image. The container entrypoint is a small wrapper that preserves the normal solver workflow: commands starting with an option such as `-gpu` or `-l` are passed to `kangaroo`.
 
 Build the image from the repo root:
 
@@ -182,6 +182,64 @@ docker run --rm --gpus all --entrypoint /usr/local/bin/kangaroo-perf kangaroo:te
 ```
 
 Related container examples now live under `docker/`, including the sample config at `docker/test.conf`.
+
+### Optional Tailscale Client Image
+
+For interruptible cloud workers, a local Kangaroo server can stay durable while Vast.ai clients join through Tailscale and run as mostly stateless GPU workers. Do not bake Tailscale auth keys into the image; pass them as runtime environment variables or secrets.
+
+Build a Tailscale-capable image:
+
+```bash
+docker build --no-cache \
+  --build-arg INSTALL_TAILSCALE=1 \
+  --build-arg CCAP=61 \
+  --build-arg GIT_COMMIT=$(git rev-parse --short HEAD) \
+  -t yourdockerhub/kangaroo:cuda12.4-tailscale .
+```
+
+For RTX 50-series / Blackwell workers, build with a matching CUDA 13 image and `CCAP=120`:
+
+```bash
+docker build --no-cache \
+  --build-arg CUDA_DEVEL_IMAGE=nvidia/cuda:13.0.2-devel-ubuntu22.04 \
+  --build-arg CUDA_RUNTIME_IMAGE=nvidia/cuda:13.0.2-runtime-ubuntu22.04 \
+  --build-arg INSTALL_TAILSCALE=1 \
+  --build-arg CCAP=120 \
+  --build-arg GIT_COMMIT=$(git rev-parse --short HEAD) \
+  -t yourdockerhub/kangaroo:blackwell-cuda13.0-tailscale .
+```
+
+Run the local durable server on a machine already joined to the tailnet:
+
+```bash
+kangaroo -s -d <dpBits> \
+  -w /work/server.work \
+  -wi 300 \
+  -wsplit \
+  -o /work/result.out \
+  /work/input.txt
+```
+
+Find the local server's Tailscale IPv4 address with `tailscale ip -4`, then start a Vast client container with kernel TUN networking:
+
+```bash
+docker run --rm --gpus all \
+  --cap-add=NET_ADMIN \
+  --cap-add=NET_RAW \
+  --device=/dev/net/tun \
+  -e TS_AUTHKEY=tskey-auth-... \
+  -e TS_HOSTNAME=kangaroo-vast-01 \
+  yourdockerhub/kangaroo:blackwell-cuda13.0-tailscale \
+  -gpu -t 0 \
+  -c <server-tailscale-ip> \
+  -w vast-client-01.kang \
+  -wss \
+  -wi 60
+```
+
+The entrypoint joins Tailscale only when `TS_AUTHKEY` or `TS_AUTHKEY_FILE` is set. Otherwise it behaves like the normal image and prepends `kangaroo` when the container command starts with an option such as `-gpu` or `-l`.
+
+Use an ephemeral Tailscale auth key for disposable Vast workers. The client image intentionally does not support Tailscale userspace proxy mode because Kangaroo opens normal TCP sockets to the server; use `/dev/net/tun` with `NET_ADMIN` and `NET_RAW` so the Tailscale route is available to the process.
 
 # Note on Time/Memory tradeoff of the DP method
 

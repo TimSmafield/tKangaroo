@@ -398,6 +398,7 @@ void GPUEngine::PrintCudaInfo() {
 
   cudaError_t err;
 
+#if CUDART_VERSION < 13000
   const char *sComputeMode[] =
   {
     "Multiple host threads",
@@ -407,6 +408,7 @@ void GPUEngine::PrintCudaInfo() {
     "Unknown",
     NULL
   };
+#endif
 
   int deviceCount = 0;
   cudaError_t error_id = cudaGetDeviceCount(&deviceCount);
@@ -432,11 +434,19 @@ void GPUEngine::PrintCudaInfo() {
 
     cudaDeviceProp deviceProp;
     cudaGetDeviceProperties(&deviceProp,i);
+    const char *computeMode = "Default";
+#if CUDART_VERSION < 13000
+    int computeModeIndex = deviceProp.computeMode;
+    if(computeModeIndex < 0 || computeModeIndex > 3)
+      computeModeIndex = 4;
+    computeMode = sComputeMode[computeModeIndex];
+#endif
+
     printf("GPU #%d %s (%dx%d cores) (Cap %d.%d) (%.1f MB) (%s)\n",
       i,deviceProp.name,deviceProp.multiProcessorCount,
       _ConvertSMVer2Cores(deviceProp.major,deviceProp.minor),
       deviceProp.major,deviceProp.minor,(double)deviceProp.totalGlobalMem / 1048576.0,
-      sComputeMode[deviceProp.computeMode]);
+      computeMode);
 
   }
 
